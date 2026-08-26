@@ -18,6 +18,7 @@ type weatherArgs struct {
 type demoModel struct{}
 
 // Generate returns a deterministic function-call conversation.
+// @param ctx request cancellation context.
 // @param req model request.
 // @return demo response.
 func (demoModel) Generate(_ context.Context, req harness.ModelRequest) (harness.ModelResponse, error) {
