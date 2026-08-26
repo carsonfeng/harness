@@ -25,6 +25,9 @@ func (r *toolRegistry) add(tool Tool) error {
 		return errors.New("harness: nil tool")
 	}
 	name := tool.Definition().Name
+	if name == skillToolName {
+		return fmt.Errorf("%w: %q", ErrReservedToolName, name)
+	}
 	if !validName(name) {
 		return fmt.Errorf("harness: invalid tool name %q", name)
 	}

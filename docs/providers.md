@@ -94,4 +94,4 @@ take precedence over entries with the same name.
 
 Non-2xx errors include the status code and a bounded response body. Configure
 timeouts through `HTTPClient`. Request cancellation always follows the context
-passed to `Harness.Run` or `Harness.RunSkill`.
+passed to `Harness.Run` or `Harness.RunThread`.

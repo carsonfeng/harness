@@ -31,8 +31,10 @@ Harness 只提供构建 Agent 最必要的能力：
 - 使用泛型将 Go 函数注册为 Tool
 - 自动从 Go 结构体生成 JSON Schema
 - 支持多个连续 Function Call
-- 支持 `SKILL.md`、工具白名单和独立步数限制
+- 支持通过复用 Thread 完成用户多轮对话
+- 支持模型自动发现 `SKILL.md`，并在激活后应用 Tool 白名单和独立步数限制
 - 保存完整的模型、工具调用和工具结果记录
+- 可选的纯元数据 Debug Logging，覆盖 Agent Loop 的每一步
 - 支持 Context 取消
 - Go 1.21+
 - 核心零第三方依赖
@@ -47,7 +49,7 @@ go get github.com/carsonfeng/harness
 
 ## 30 秒上手
 
-下面使用 OpenAI Responses API 完成一次普通对话：
+下面使用 OpenAI Chat Completions API 完成一次普通对话：
 
 ```go
 package main
@@ -63,13 +65,14 @@ import (
 )
 
 func main() {
-    model := openai.NewResponses(openai.Config{
+    model := openai.NewChatCompletions(openai.Config{
         APIKey: os.Getenv("OPENAI_API_KEY"),
         Model:  os.Getenv("OPENAI_MODEL"),
     })
 
     agent := harness.New(
         harness.WithModel(model),
+        harness.WithDebug(os.Stderr),
     )
 
     result, err := agent.Run(
@@ -298,19 +301,19 @@ tools:
 4. 只报告正确性、安全、并发、数据损坏和兼容性问题。
 ```
 
-加载并运行：
+注册 Skill 目录后，像普通请求一样运行：
 
 ```go
 if err := agent.SkillDir("./skills"); err != nil {
     log.Fatal(err)
 }
 
-result, err := agent.RunSkill(
-    ctx,
-    "code-review",
-    "审查 MR !123",
-)
+result, err := agent.Run(ctx, "审查 MR !123")
 ```
+
+调用方不需要、也不应该为每个请求指定 Skill。Harness 使用渐进披露：尚未激活 Skill 时，模型只会通过内部 Tool `load_skill` 看到按名称排序的 Skill 名称和描述，不会提前收到完整 Instructions。模型判断某个 Skill 与任务匹配后，可以调用 `load_skill`；如果没有匹配项，也可以直接继续处理请求。
+
+`load_skill` 成功后，完整 Instructions 会作为 Tool Result 返回给模型。从下一次模型请求开始，Harness 会应用该 Skill 的 Tool 白名单和 `max_steps`。`load_skill` 是 Harness 保留名称，应用不能注册同名 Tool。
 
 Skill 行为：
 
@@ -318,25 +321,106 @@ Skill 行为：
 - 每个 Skill 使用一个 `SKILL.md`。
 - 支持 `name`、`description`、`max_steps`、`tools` 四个 Front Matter 字段。
 - Front Matter 是 Harness 支持的精简格式，不是完整 YAML 实现。
-- 非空 `tools` 列表是 Tool 白名单。
-- 省略 `tools` 或配置空列表时，该 Skill 可以使用全部已注册 Tool。
-- `max_steps` 会覆盖当前 Harness 的默认步数限制。
+- 没有匹配的 Skill 时，模型可以不加载 Skill，直接继续处理请求。
+- `load_skill` 必须是该次模型响应中唯一的 Tool Call。
+- Skill 激活后，非空 `tools` 列表是 Tool 白名单；省略或留空时可以使用全部已注册 Tool。
+- 模型选择 Skill 的那次调用不计入 `max_steps`；激活后最多再调用模型 `max_steps` 次。后续每次 `RunThread` 都按该限制执行。
+- Skill 激活记录保存在 Thread 历史中，后续 `RunThread` 以及保存后恢复的 Thread 会继续使用它。
+- 一个 Thread 最多激活一个 Skill；需要重新选择时，请使用新的 Thread 或调用 `Run` 开始新任务。
 - 没有 Front Matter 时，目录名会作为 Skill 名称。
 
-## Thread 与 Result
+激活前，模型仍然可以看到普通已注册 Tool 和 `load_skill`。因此 Skill 的 `tools` 只用于激活后的工作范围收敛，不是权限控制或安全边界；敏感操作仍应在 Tool 实现中完成鉴权和校验。
 
-每次 `Run` 或 `RunSkill` 都会创建一个独立 Thread：
+也可以通过 `agent.Skill(...)` 注册内存中的 Skill。它同样可以被模型发现，但不会为某个请求预先选择该 Skill。
+
+## 执行模型
+
+Harness 使用的是**同步 Agent Loop**。`Run` 和 `RunThread` 都会阻塞，直到模型返回最终答案或本次运行失败：
 
 ```go
 result, err := agent.Run(ctx, prompt)
+```
+
+一次运行按照以下顺序执行：
+
+```text
+请求模型
+    ↓ 等待返回
+执行 Tool 1
+    ↓ 等待完成
+执行 Tool 2
+    ↓ 等待完成
+再次请求模型
+    ↓ 等待返回
+最终结果
+```
+
+如果模型在一轮中返回多个 Tool Call，Harness 会按照返回顺序串行执行。它不会自动创建 goroutine，也不会并行执行 Tool。
+
+在本 SDK 中，**Thread 指一次对话的消息时间线（Conversation Thread）**。它保存 System、User、Assistant、Tool Call 和 Tool Result 组成的有序消息记录。它不是操作系统线程、goroutine、异步任务或后台 Worker。
+
+Thread 内部使用互斥锁，因此 `Add` 和 `Messages` 可以安全并发调用。这只是在保护会话数据，并不代表 Agent Loop 是异步的。使用 `RunThread` 时，调用方从一开始就持有 Thread，可以在运行中读取消息快照，但当前没有事件流，也不保证中间状态稳定。
+
+调用方可以并发启动多个互相独立的 Run：
+
+```go
+go func() {
+    resultA, err := agent.Run(ctx, "task A")
+    // 处理 resultA 和 err
+}()
+
+go func() {
+    resultB, err := agent.Run(ctx, "task B")
+    // 处理 resultB 和 err
+}()
+```
+
+每次 `Run` 都会创建自己的 Thread，不会在不同 Run 之间共享消息。并发运行前应先完成 Harness 配置，并确保使用的 Model 和 Tool 实现本身支持并发调用。
+
+把 `Run` 放进 goroutine，只是由调用方把阻塞调用移到了另一个 goroutine，并不会自动获得 Streaming、进度事件或暂停恢复能力。这些 API 当前尚未提供。
+
+## Debug Logging
+
+诊断耗时较长或可能循环的运行时，可以开启简洁的进度日志：
+
+```go
+agent := harness.New(
+    harness.WithModel(model),
+    harness.WithDebug(os.Stderr),
+)
+```
+
+Agent Loop 的每一步都会报告当前步数和上限，以及模型请求与响应、Tool 开始与结束、Skill 激活、完成、取消或达到步数上限等事件。日志只包含计数、名称和 Call ID，不会记录 Prompt、Tool Arguments、Tool Results 或模型文本。
+
+```text
+harness: 2026/08/26 12:00:00 step=1/20 event=model_request messages=2 tools=4 skill=""
+harness: 2026/08/26 12:00:01 step=1/20 event=model_response tool_calls=1 final=false
+harness: 2026/08/26 12:00:01 step=1/20 event=tool_start tool="get_weather" call_id="call_123"
+```
+
+Debug Logging 默认关闭。向 `WithDebug` 传入 nil 可以显式关闭。所有可运行示例都会开启 Debug Logging，并写入标准错误输出。
+
+## Thread 与 Result
+
+`Run` 会创建新 Thread。使用 `RunThread` 可以继续调用方持有的用户多轮对话：
+
+```go
+thread := harness.NewThread()
+
+first, err := agent.RunThread(ctx, thread, "广州天气怎么样？")
 if err != nil {
     log.Fatal(err)
 }
 
-fmt.Println(result.Text)
-fmt.Println(result.Steps)
+second, err := agent.RunThread(ctx, thread, "那深圳呢？")
+if err != nil {
+    log.Fatal(err)
+}
 
-messages := result.Thread.Messages()
+fmt.Println(first.Text)
+fmt.Println(second.Text)
+
+messages := thread.Messages()
 ```
 
 `Result` 包含：
@@ -347,21 +431,32 @@ messages := result.Thread.Messages()
 | `Steps` | 本次执行调用模型的次数 |
 | `Thread` | 完整对话、Tool Call 和 Tool Result |
 
-`Thread.Messages()` 返回可以安全修改的快照，并且支持并发读取。
+每次 `RunThread` 会追加一条 User Message，并完成当前这一轮完整的 Model → Tool → Model 循环。`Result.Thread` 与传入指针相同，`Result.Steps` 只统计当前用户轮次。
 
-如需持久化会话，保存 `result.Thread.Messages()` 即可。当前 Harness 每次运行都会创建新 Thread，暂不提供继续已有 Thread 的公开接口。
+`Thread.Messages()` 返回可以安全修改的快照。这里的并发保护只针对消息存储，不代表 Agent 执行是异步的。
+
+如需持久化成功的对话，可以保存 `thread.Messages()`，再通过 `harness.NewThread(savedMessages...)` 恢复并继续调用 `RunThread`。Skill 激活状态也是历史的一部分；恢复的消息应被视为可信的应用状态。当前历史会持续增长，尚未内置压缩或上下文预算管理。
+
+Harness 只会在空 Thread 中注入 System Instructions。恢复非空 Thread 时，已有消息历史具有优先权。
+
+同一时间只能有一个 `RunThread` 使用某个 Thread；重叠运行会返回 `harness.ErrThreadBusy`。成功的 `load_skill` Tool Call 和 Result 会成为消息历史的一部分，因此同一 Thread 的后续用户轮次会继续使用已经激活的 Skill，而不是再次选择。一个 Thread 只能激活一个 Skill。某次 `RunThread` 执行期间不要调用 `Thread.Add`；可以通过 `Messages` 获取只读用途的消息快照。
+
+运行开始后如果发生错误，Thread 可能留下不完整历史。再次使用前应先检查消息；对于带副作用的 Tool，盲目重试可能造成重复执行。
 
 ## Agent Loop 行为
 
 - 默认最多调用模型 20 次。
 - 使用 `harness.WithMaxSteps` 修改默认限制。
-- Skill 的 `max_steps` 优先级更高。
+- Skill 激活后，它的 `max_steps` 优先级更高；选择 Skill 的模型调用不占用该预算。
 - 同一轮返回多个 Tool Call 时，按照模型返回顺序串行执行。
 - Tool 执行失败时，将 `{"error":"..."}` 返回给模型，由模型决定重试、换工具或解释错误。
 - 模型错误和 Context 取消会立即终止执行。
 - 达到最大步数时返回 `harness.ErrMaxSteps`。
 - 未配置模型时返回 `harness.ErrNoModel`。
+- `RunThread` 收到 nil 时返回 `harness.ErrNilThread`。
+- 同一个 Thread 重叠运行时返回 `harness.ErrThreadBusy`。
 - Tool 定义会按名称排序，确保发送给模型的请求稳定。
+- 使用 `WithDebug` 可以观察模型循环的每一步，而不会记录消息内容。
 
 配置 System Prompt 和步数：
 
@@ -394,7 +489,7 @@ agent := harness.New(
 )
 ```
 
-`WithTools` 中的错误会延迟到第一次 `Run` 或 `RunSkill` 时返回。需要启动阶段立即失败时，优先使用 `Tool` 或 `Tools`。
+`WithTools` 中的错误会延迟到第一次 `Run` 或 `RunThread` 时返回。需要启动阶段立即失败时，优先使用 `Tool` 或 `Tools`。
 
 ## 自定义 Model
 
@@ -422,28 +517,30 @@ type Model interface {
 
 | 示例 | 说明 | 是否需要 API Key |
 |---|---|---|
-| `examples/weather` | 无网络的完整 Function Call 流程 | 否 |
-| `examples/skill` | 加载并运行 `SKILL.md` | 否 |
-| `examples/openai-chat` | OpenAI Chat Completions 最小接入 | 是 |
-| `examples/openai-responses` | OpenAI Responses + 本地时间 Tool | 是 |
-| `examples/anthropic` | Anthropic Messages + 加法 Tool | 是 |
-| `examples/custom-host` | OpenAI 兼容网关或本地模型 | 取决于服务 |
+| `examples/weather` | Chat Completions Function Call 流程 | 取决于 Host |
+| `examples/skill` | 模型自动发现并激活 Skill | 取决于 Host |
+| `examples/multi-turn` | 用户多轮对话并重复调用 Tool | 取决于 Host |
+| `examples/openai-chat` | OpenAI Chat Completions 最小接入 | 取决于 Host |
+| `examples/openai-responses` | OpenAI Responses + 本地时间 Tool | 取决于 Host |
+| `examples/anthropic` | Anthropic Messages + 加法 Tool | 取决于 Host |
+| `examples/custom-host` | OpenAI 兼容网关或本地模型 | 取决于 Host |
 
-运行无网络示例：
+主要示例使用 OpenAI Chat Completions：
 
 ```bash
-go run ./examples/weather
-go run ./examples/skill
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/weather
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/skill
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/multi-turn
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/openai-chat
 ```
 
 `examples/skill` 使用仓库内的相对路径，请从仓库根目录运行。
 
-运行 OpenAI 示例：
+`OPENAI_BASE_URL` 是可选项；不设置时使用 OpenAI 默认 Host，设置后可以连接兼容 Chat Completions 的自定义 Host。如果自定义 Host 不要求鉴权，也可以省略 `OPENAI_API_KEY`。
+
+运行 Responses 示例：
 
 ```bash
-OPENAI_API_KEY=... OPENAI_MODEL=... \
-go run ./examples/openai-chat
-
 OPENAI_API_KEY=... OPENAI_MODEL=... \
 go run ./examples/openai-responses
 ```

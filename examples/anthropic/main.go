@@ -20,8 +20,18 @@ type addArgs struct {
 // @param none.
 // @return none.
 func main() {
-	model := anthropic.New(anthropic.Config{APIKey: os.Getenv("ANTHROPIC_API_KEY"), Model: required("ANTHROPIC_MODEL")})
-	agent := harness.New(harness.WithModel(model))
+	config := anthropic.Config{
+		APIKey: os.Getenv("ANTHROPIC_API_KEY"),
+		Model:  required("ANTHROPIC_MODEL"),
+	}
+	if baseURL := os.Getenv("ANTHROPIC_BASE_URL"); baseURL != "" {
+		config.BaseURL = baseURL
+	}
+	model := anthropic.New(config)
+	agent := harness.New(
+		harness.WithModel(model),
+		harness.WithDebug(os.Stderr),
+	)
 	err := agent.Tool(harness.Func("add", "Add two numbers", func(_ context.Context, args addArgs) (float64, error) { return args.A + args.B, nil }))
 	if err != nil {
 		log.Fatal(err)

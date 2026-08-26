@@ -2,40 +2,33 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/carsonfeng/harness"
+	"github.com/carsonfeng/harness/model/openai"
 )
 
 type weatherArgs struct {
 	City string `json:"city" description:"City to look up"`
 }
 
-// demoModel makes the example runnable without an API key. A real adapter maps
-// harness.ModelRequest and harness.ModelResponse to a provider's SDK types.
-type demoModel struct{}
-
-// Generate returns a deterministic function-call conversation.
-// @param ctx request cancellation context.
-// @param req model request.
-// @return demo response.
-func (demoModel) Generate(_ context.Context, req harness.ModelRequest) (harness.ModelResponse, error) {
-	last := req.Messages[len(req.Messages)-1]
-	if last.Role == harness.RoleUser {
-		return harness.ModelResponse{ToolCalls: []harness.ToolCall{{
-			ID: "weather-1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"Guangzhou"}`),
-		}}}, nil
-	}
-	return harness.ModelResponse{Text: "The weather tool returned: " + last.Content}, nil
-}
-
-// main runs the no-key weather example.
+// main runs a real Chat Completions tool loop.
 // @param none.
 // @return none.
 func main() {
-	h := harness.New(harness.WithModel(demoModel{}))
+	config := openai.Config{
+		APIKey: os.Getenv("OPENAI_API_KEY"),
+		Model:  required("OPENAI_MODEL"),
+	}
+	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+		config.BaseURL = baseURL
+	}
+	h := harness.New(
+		harness.WithModel(openai.NewChatCompletions(config)),
+		harness.WithDebug(os.Stderr),
+	)
 	err := h.Tool(harness.Func("get_weather", "Get the current weather", func(_ context.Context, args weatherArgs) (string, error) {
 		return args.City + ": 28°C, sunny", nil
 	}))
@@ -47,4 +40,15 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println(result.Text)
+}
+
+// required reads a required environment variable.
+// @param name environment variable name.
+// @return configured value.
+func required(name string) string {
+	value := os.Getenv(name)
+	if value == "" {
+		log.Fatalf("%s is required", name)
+	}
+	return value
 }

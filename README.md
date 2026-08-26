@@ -31,8 +31,10 @@ It is not a workflow engine, RAG framework, hosted platform, or multi-agent syst
 - Generic Go functions as model tools
 - Automatic JSON Schema generation from Go structs
 - Multiple sequential function calls
-- `SKILL.md`, tool allowlists, and per-skill step limits
+- Reusable Threads for user multi-turn conversations
+- Automatic model-driven `SKILL.md` discovery, post-activation tool allowlists, and per-skill step limits
 - Complete model, tool-call, and tool-result history
+- Opt-in metadata-only debug logging for every agent-loop step
 - Context cancellation
 - Go 1.21+
 - Zero third-party dependencies in the core
@@ -47,7 +49,7 @@ Harness requires Go 1.21 or later.
 
 ## 30-second quick start
 
-The following program sends one request through the OpenAI Responses API:
+The following program sends one request through the OpenAI Chat Completions API:
 
 ```go
 package main
@@ -63,13 +65,14 @@ import (
 )
 
 func main() {
-    model := openai.NewResponses(openai.Config{
+    model := openai.NewChatCompletions(openai.Config{
         APIKey: os.Getenv("OPENAI_API_KEY"),
         Model:  os.Getenv("OPENAI_MODEL"),
     })
 
     agent := harness.New(
         harness.WithModel(model),
+        harness.WithDebug(os.Stderr),
     )
 
     result, err := agent.Run(
@@ -298,19 +301,21 @@ tools:
 4. Report only correctness, security, concurrency, data-loss, and compatibility issues.
 ```
 
-Load and run it:
+Load the directory once, then use the normal run API:
 
 ```go
 if err := agent.SkillDir("./skills"); err != nil {
     log.Fatal(err)
 }
 
-result, err := agent.RunSkill(
-    ctx,
-    "code-review",
-    "Review MR !123",
-)
+result, err := agent.Run(ctx, "Review MR !123")
 ```
+
+The caller does not choose a skill for each request. Harness exposes a reserved
+internal `load_skill` tool containing only the sorted skill names and
+descriptions. The model decides whether a skill applies and calls `load_skill`
+by itself. Harness returns the complete instructions only after that call, then
+narrows the available tools and applies the skill's step budget.
 
 Skill behavior:
 
@@ -318,25 +323,112 @@ Skill behavior:
 - Each skill is stored in one `SKILL.md` file.
 - Supported front-matter fields are `name`, `description`, `max_steps`, and `tools`.
 - Front matter uses a small Harness-specific subset; it is not a general YAML parser.
-- A non-empty `tools` list acts as an allowlist.
+- The model may continue without loading a skill when none is relevant.
+- `load_skill` must be the only tool call in its model turn.
+- A non-empty `tools` list acts as an allowlist after activation.
 - Omitting `tools`, or providing an empty list, exposes all registered tools.
-- `max_steps` overrides the Harness default for that run.
+- Before activation, ordinary registered tools remain visible alongside `load_skill`. A skill allowlist scopes the workflow; it is not an authorization or security boundary.
+- `max_steps` limits model calls after selection. The selection call is not charged to that budget; an already-active skill applies its budget independently to every later `RunThread` call.
+- One skill can be active in a Thread. Its instructions and policy are stored in Thread history and remain active across later turns and restored history.
+- Start a new Thread with `Run` when the model should choose a different skill.
+- `load_skill` is reserved and cannot be registered as an application tool.
 - Without front matter, the directory name becomes the skill name.
 
-## Thread and Result
+Use `agent.Skill(...)` to register an in-memory skill. This also makes the skill
+discoverable; it does not select it for a request.
 
-Every `Run` and `RunSkill` creates an independent thread:
+## Execution model
+
+Harness uses a **synchronous agent loop**. `Run` and `RunThread` block until the model returns a final answer or the run fails:
 
 ```go
 result, err := agent.Run(ctx, prompt)
+```
+
+One run executes in order:
+
+```text
+Model request
+    ↓ wait
+Tool call 1
+    ↓ wait
+Tool call 2
+    ↓ wait
+Next model request
+    ↓ wait
+Final result
+```
+
+If a model returns multiple tool calls in one turn, Harness executes them sequentially in response order. It does not create goroutines or execute tools in parallel.
+
+In this SDK, **Thread means conversation thread**. It is the ordered history of system, user, assistant, tool-call, and tool-result messages. It is not an operating-system thread, goroutine, asynchronous task, or background worker.
+
+The Thread type uses a mutex so `Add` and `Messages` are safe to call concurrently. This protects conversation data; it does not make the agent loop asynchronous. A caller using `RunThread` already owns the Thread and may read snapshots while a run is active, but there is no event stream or stable intermediate-state contract.
+
+Applications may start multiple independent runs concurrently:
+
+```go
+go func() {
+    resultA, err := agent.Run(ctx, "task A")
+    // handle resultA and err
+}()
+
+go func() {
+    resultB, err := agent.Run(ctx, "task B")
+    // handle resultB and err
+}()
+```
+
+Each `Run` creates its own Thread, so messages are not shared between runs. Configure the Harness before starting concurrent runs, and ensure the configured Model and Tool implementations are themselves safe for concurrent use.
+
+Wrapping `Run` in a goroutine only moves the blocking call to the caller's goroutine. It does not provide streaming, progress events, or pause/resume. Those APIs are outside the current scope.
+
+## Debug logging
+
+Enable concise progress logs when diagnosing a long or looping run:
+
+```go
+agent := harness.New(
+    harness.WithModel(model),
+    harness.WithDebug(os.Stderr),
+)
+```
+
+Each loop reports its current step and limit, model request/response state, Tool
+start/finish events, Skill activation, completion, cancellation, or the step
+limit. Logs contain counts, names, and call IDs, but not prompts, Tool arguments,
+Tool results, or model text.
+
+```text
+harness: 2026/08/26 12:00:00 step=1/20 event=model_request messages=2 tools=4 skill=""
+harness: 2026/08/26 12:00:01 step=1/20 event=model_response tool_calls=1 final=false
+harness: 2026/08/26 12:00:01 step=1/20 event=tool_start tool="get_weather" call_id="call_123"
+```
+
+Debug logging is disabled by default. Pass nil to `WithDebug` to disable it
+explicitly. All runnable examples enable it and write to standard error.
+
+## Thread and Result
+
+`Run` creates a new Thread. Use `RunThread` to continue a caller-owned conversation:
+
+```go
+thread := harness.NewThread()
+
+first, err := agent.RunThread(ctx, thread, "What is the weather in Guangzhou?")
 if err != nil {
     log.Fatal(err)
 }
 
-fmt.Println(result.Text)
-fmt.Println(result.Steps)
+second, err := agent.RunThread(ctx, thread, "How about Shenzhen?")
+if err != nil {
+    log.Fatal(err)
+}
 
-messages := result.Thread.Messages()
+fmt.Println(first.Text)
+fmt.Println(second.Text)
+
+messages := thread.Messages()
 ```
 
 `Result` contains:
@@ -347,21 +439,32 @@ messages := result.Thread.Messages()
 | `Steps` | Number of model calls made by the run |
 | `Thread` | Complete messages, tool calls, and tool results |
 
-`Thread.Messages()` returns a safe, mutable snapshot. The Thread itself supports concurrent access.
+Each `RunThread` appends one user message and completes that turn's full Model → Tool → Model loop. `Result.Thread` is the same pointer supplied by the caller, and `Result.Steps` counts only the current turn.
 
-To persist a successful run, store `result.Thread.Messages()`. Harness currently starts a new Thread for each run and does not expose an API for resuming an existing Thread.
+`Thread.Messages()` returns a safe, mutable snapshot. Its concurrency protection applies to message storage, not to agent execution.
+
+To persist a successful conversation, store `thread.Messages()` and restore it with `harness.NewThread(savedMessages...)` before calling `RunThread` again. Skill activation is part of that history. Treat restored messages as trusted application state. History currently grows without automatic compaction or context-budget management.
+
+Harness injects its system instructions only when a Thread is empty. When restoring a non-empty Thread, its existing message history is authoritative.
+
+Only one `RunThread` may use a Thread at a time; an overlapping call returns `harness.ErrThreadBusy`. A successful `load_skill` call keeps that skill active for later `RunThread` turns. Do not call `Thread.Add` while a run is active; `Messages` may be used for read-only snapshots during a run.
+
+If a run fails after it has started, its Thread may contain partial history. Inspect the messages before deciding whether to recover them into a new Thread; blindly retrying a side-effecting Tool can execute it twice.
 
 ## Agent loop behavior
 
 - The default limit is 20 model calls.
 - Use `harness.WithMaxSteps` to change the default.
-- A skill's `max_steps` takes precedence for that run.
+- An active skill's `max_steps` takes precedence for each run. On the activation turn, skill selection itself does not consume that budget.
 - Multiple tool calls in one model response execute sequentially in response order.
 - Tool failures are returned to the model as `{"error":"..."}` so it can retry, choose another tool, or explain the failure.
 - Model failures and context cancellation stop the run immediately.
 - Exceeding the limit returns `harness.ErrMaxSteps`.
 - Running without a model returns `harness.ErrNoModel`.
+- Passing nil to `RunThread` returns `harness.ErrNilThread`.
+- Overlapping runs on one Thread return `harness.ErrThreadBusy`.
 - Tool definitions are sorted by name for deterministic model requests.
+- Use `WithDebug` to observe every model-loop step without logging message contents.
 
 Configure system instructions and a step limit:
 
@@ -394,7 +497,7 @@ agent := harness.New(
 )
 ```
 
-Errors from `WithTools` are reported by the first `Run` or `RunSkill`. Prefer `Tool` or `Tools` when configuration must fail immediately during startup.
+Errors from `WithTools` are reported by the first `Run` or `RunThread`. Prefer `Tool` or `Tools` when configuration must fail immediately during startup.
 
 ## Custom model adapters
 
@@ -422,28 +525,29 @@ Tests and lightweight adapters can use `harness.ModelFunc` directly.
 
 | Example | Purpose | API key required |
 |---|---|---|
-| `examples/weather` | Complete offline function-call loop | No |
-| `examples/skill` | Load and run `SKILL.md` | No |
-| `examples/openai-chat` | Minimal OpenAI Chat Completions setup | Yes |
-| `examples/openai-responses` | OpenAI Responses with a local-time tool | Yes |
-| `examples/anthropic` | Anthropic Messages with an addition tool | Yes |
+| `examples/weather` | Chat Completions function-call loop | Depends on the host |
+| `examples/skill` | Automatic skill discovery and activation | Depends on the host |
+| `examples/multi-turn` | User multi-turn conversation with repeated tool calls | Depends on the host |
+| `examples/openai-chat` | Minimal OpenAI Chat Completions setup | Depends on the host |
+| `examples/openai-responses` | OpenAI Responses with a local-time tool | Depends on the host |
+| `examples/anthropic` | Anthropic Messages with an addition tool | Depends on the host |
 | `examples/custom-host` | OpenAI-compatible gateway or local model | Depends on the host |
 
-Run the offline examples:
+The primary examples use OpenAI Chat Completions:
 
 ```bash
-go run ./examples/weather
-go run ./examples/skill
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/weather
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/skill
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/multi-turn
+OPENAI_API_KEY=... OPENAI_MODEL=... go run ./examples/openai-chat
 ```
 
 `examples/skill` uses a repository-relative path and must be run from the repository root.
+Set `OPENAI_BASE_URL` on any of these commands to use a compatible custom host.
 
-Run the OpenAI examples:
+Run the Responses example:
 
 ```bash
-OPENAI_API_KEY=... OPENAI_MODEL=... \
-go run ./examples/openai-chat
-
 OPENAI_API_KEY=... OPENAI_MODEL=... \
 go run ./examples/openai-responses
 ```
@@ -472,6 +576,7 @@ harness/
 ├── api.go                         # Root-package public facade
 ├── harness.go                     # Agent loop
 ├── registry.go                    # Tool registration and selection
+├── skill_discovery.go             # Model-driven skill activation
 ├── model/
 │   ├── model.go                   # Model interface and neutral messages
 │   ├── openai/                    # Chat Completions and Responses

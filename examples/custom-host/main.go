@@ -19,9 +19,12 @@ func main() {
 		APIKey:  os.Getenv("OPENAI_API_KEY"),
 		Model:   required("OPENAI_MODEL"),
 		BaseURL: required("OPENAI_BASE_URL"),
-		Headers: map[string]string{"X-Gateway-Client": "harness-example"},
 	})
-	result, err := harness.New(harness.WithModel(model)).Run(context.Background(), "Reply with: gateway works")
+	agent := harness.New(
+		harness.WithModel(model),
+		harness.WithDebug(os.Stderr),
+	)
+	result, err := agent.Run(context.Background(), "Reply with: gateway works")
 	if err != nil {
 		log.Fatal(err)
 	}

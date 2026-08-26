@@ -16,21 +16,34 @@ type clockArgs struct {
 	Timezone string `json:"timezone" description:"IANA timezone, for example Asia/Shanghai"`
 }
 
-// main lets the model call a local clock function.
+// main continues two user turns that may call the local clock tool.
 // @param none.
 // @return none.
 func main() {
-	model := openai.NewResponses(openai.Config{APIKey: os.Getenv("OPENAI_API_KEY"), Model: required("OPENAI_MODEL")})
-	agent := harness.New(harness.WithModel(model))
+	config := openai.Config{
+		APIKey: os.Getenv("OPENAI_API_KEY"),
+		Model:  required("OPENAI_MODEL"),
+	}
+	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+		config.BaseURL = baseURL
+	}
+	model := openai.NewResponses(config)
+	agent := harness.New(
+		harness.WithModel(model),
+		harness.WithDebug(os.Stderr),
+	)
 	err := agent.Tool(harness.Func("local_time", "Get the current time", localTime))
 	if err != nil {
 		log.Fatal(err)
 	}
-	result, err := agent.Run(context.Background(), "What time is it in Shanghai?")
-	if err != nil {
-		log.Fatal(err)
+	thread := harness.NewThread()
+	for _, prompt := range []string{"What time is it in Shanghai?", "How about Tokyo?"} {
+		result, err := agent.RunThread(context.Background(), thread, prompt)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(result.Text)
 	}
-	fmt.Println(result.Text)
 }
 
 // localTime returns the current time in an IANA timezone.

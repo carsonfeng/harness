@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"sync"
+
+	corethread "github.com/carsonfeng/harness/thread"
 )
 
 var (
@@ -13,6 +17,10 @@ var (
 	ErrNoModel = errors.New("harness: no model configured")
 	// ErrMaxSteps indicates that the model did not finish within the run limit.
 	ErrMaxSteps = errors.New("harness: maximum steps reached")
+	// ErrNilThread indicates that RunThread received a nil thread.
+	ErrNilThread = errors.New("harness: thread is nil")
+	// ErrThreadBusy indicates that another run is using the same thread.
+	ErrThreadBusy = corethread.ErrBusy
 )
 
 const defaultMaxSteps = 20
@@ -46,6 +54,19 @@ func WithMaxSteps(steps int) Option {
 	}
 }
 
+// WithDebug writes concise agent-loop progress to output. A nil output disables it.
+// @param output debug log destination.
+// @return harness option.
+func WithDebug(output io.Writer) Option {
+	return func(h *Harness) {
+		if output == nil {
+			h.debug = nil
+			return
+		}
+		h.debug = log.New(output, "harness: ", log.LstdFlags)
+	}
+}
+
 // WithTools registers tools during construction. Invalid or duplicate tools
 // are reported when Run starts. Use Tool when registration errors are needed
 // immediately.
@@ -68,6 +89,7 @@ type Harness struct {
 	system   string
 	maxSteps int
 	tools    *toolRegistry
+	debug    *log.Logger
 
 	mu       sync.RWMutex
 	skills   map[string]Skill
@@ -109,11 +131,20 @@ func (h *Harness) Tools(tools ...Tool) error {
 
 // Skill registers or replaces one in-memory skill.
 // @param skill skill to register.
-// @return name validation error.
+// @return configuration validation error.
 func (h *Harness) Skill(skill Skill) error {
 	if !validName(skill.Name) {
 		return fmt.Errorf("harness: invalid skill name %q", skill.Name)
 	}
+	if skill.MaxSteps < 0 {
+		return errors.New("harness: skill max steps must not be negative")
+	}
+	for _, name := range skill.Tools {
+		if !validName(name) {
+			return fmt.Errorf("harness: invalid skill tool name %q", name)
+		}
+	}
+	skill.Tools = append([]string(nil), skill.Tools...)
 	h.mu.Lock()
 	h.skills[skill.Name] = skill
 	h.mu.Unlock()
@@ -130,6 +161,7 @@ func (h *Harness) SkillDir(root string) error {
 	}
 	h.mu.Lock()
 	for name, skill := range skills {
+		skill.Tools = append([]string(nil), skill.Tools...)
 		h.skills[name] = skill
 	}
 	h.mu.Unlock()
@@ -148,79 +180,152 @@ type Result struct {
 // @param input user prompt.
 // @return final result or run error.
 func (h *Harness) Run(ctx context.Context, input string) (*Result, error) {
-	return h.run(ctx, input, Skill{})
+	return h.RunThread(ctx, NewThread(), input)
 }
 
-// RunSkill runs with a registered skill's instructions, tool allowlist, and
-// optional step limit.
+// RunThread appends one user turn to an existing conversation and runs it.
 // @param ctx run cancellation context.
-// @param name registered skill name.
+// @param thread conversation to continue.
 // @param input user prompt.
 // @return final result or run error.
-func (h *Harness) RunSkill(ctx context.Context, name, input string) (*Result, error) {
-	h.mu.RLock()
-	skill, ok := h.skills[name]
-	h.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("harness: unknown skill %q", name)
-	}
-	return h.run(ctx, input, skill)
+func (h *Harness) RunThread(ctx context.Context, thread *Thread, input string) (*Result, error) {
+	return h.runThread(ctx, thread, input)
 }
 
-// run executes the shared agent loop.
+// runThread executes the shared agent loop against one conversation.
 // @param ctx run cancellation context.
+// @param thread conversation to continue.
 // @param input user prompt.
-// @param skill optional run policy.
 // @return final result or run error.
-func (h *Harness) run(ctx context.Context, input string, skill Skill) (*Result, error) {
+func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (*Result, error) {
 	if h.setupErr != nil {
 		return nil, h.setupErr
 	}
 	if h.model == nil {
 		return nil, ErrNoModel
 	}
-	selected, definitions, err := h.tools.selectTools(skill.Tools)
+	if thread == nil {
+		return nil, ErrNilThread
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	release, err := thread.BeginRun()
 	if err != nil {
 		return nil, err
 	}
-	thread := NewThread()
-	system := h.system
-	if skill.Instructions != "" {
-		if system != "" {
-			system += "\n\n"
-		}
-		system += skill.Instructions
+	defer release()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if system != "" {
-		thread.Add(Message{Role: RoleSystem, Content: system})
+	messages := thread.Messages()
+	skills := h.skillSnapshot()
+	active, err := activeSkill(messages)
+	if err != nil {
+		return nil, err
+	}
+	selected, definitions, err := definitionsForRun(h.tools, skills, active)
+	if err != nil {
+		return nil, err
+	}
+	maxSteps := h.maxSteps
+	if active != nil && active.MaxSteps > 0 {
+		maxSteps = active.MaxSteps
+	}
+	if h.system != "" && len(messages) == 0 {
+		thread.Add(Message{Role: RoleSystem, Content: h.system})
 	}
 	thread.Add(Message{Role: RoleUser, Content: input})
 
-	maxSteps := h.maxSteps
-	if skill.MaxSteps > 0 {
-		maxSteps = skill.MaxSteps
-	}
 	for step := 1; step <= maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
+			h.debugf("step=%d/%d event=cancel error=%q", step, maxSteps, err)
 			return nil, err
 		}
-		response, err := h.model.Generate(ctx, ModelRequest{Messages: thread.Messages(), Tools: definitions})
+		skillName := ""
+		if active != nil {
+			skillName = active.Name
+		}
+		requestMessages := thread.Messages()
+		h.debugf("step=%d/%d event=model_request messages=%d tools=%d skill=%q", step, maxSteps, len(requestMessages), len(definitions), skillName)
+		response, err := h.model.Generate(ctx, ModelRequest{Messages: requestMessages, Tools: definitions})
 		if err != nil {
+			h.debugf("step=%d/%d event=model_error error_type=%T", step, maxSteps, err)
 			return nil, fmt.Errorf("harness: generate step %d: %w", step, err)
 		}
+		h.debugf("step=%d/%d event=model_response tool_calls=%d final=%t", step, maxSteps, len(response.ToolCalls), len(response.ToolCalls) == 0)
 		thread.Add(Message{Role: RoleAssistant, Content: response.Text, ToolCalls: response.ToolCalls})
 		if len(response.ToolCalls) == 0 {
+			h.debugf("step=%d/%d event=complete", step, maxSteps)
 			return &Result{Text: response.Text, Thread: thread, Steps: step}, nil
+		}
+		hasSkillCall := false
+		for _, call := range response.ToolCalls {
+			if call.Name == skillToolName {
+				hasSkillCall = true
+				break
+			}
+		}
+		if hasSkillCall && len(response.ToolCalls) != 1 {
+			h.debugf("step=%d/%d event=skill_rejected reason=mixed_tool_calls", step, maxSteps)
+			content := errorResult(errors.New("load_skill must be the only tool call in its model turn"))
+			for _, call := range response.ToolCalls {
+				thread.Add(Message{Role: RoleTool, Content: content, ToolCallID: call.ID, Name: call.Name})
+			}
+			continue
 		}
 		for _, call := range response.ToolCalls {
 			if err := ctx.Err(); err != nil {
+				h.debugf("step=%d/%d event=cancel error=%q", step, maxSteps, err)
 				return nil, err
 			}
-			content := executeTool(ctx, selected, call)
+			h.debugf("step=%d/%d event=tool_start tool=%q call_id=%q", step, maxSteps, call.Name, call.ID)
+			var content string
+			if call.Name == skillToolName {
+				if active != nil {
+					content = errorResult(errors.New("a skill is already active in this thread"))
+				} else {
+					loaded, result, loadErr := loadSkill(call.Arguments, skills)
+					if loadErr != nil {
+						content = errorResult(loadErr)
+					} else {
+						newSelected, newDefinitions, selectErr := definitionsForRun(h.tools, skills, loaded)
+						if selectErr != nil {
+							content = errorResult(selectErr)
+						} else {
+							active = loaded
+							selected = newSelected
+							definitions = newDefinitions
+							content = result
+							budget := h.maxSteps
+							if active.MaxSteps > 0 {
+								budget = active.MaxSteps
+							}
+							maxSteps = step + budget
+							h.debugf("step=%d/%d event=skill_activated skill=%q tools=%d budget=%d", step, maxSteps, active.Name, len(definitions), budget)
+						}
+					}
+				}
+			} else {
+				content = executeTool(ctx, selected, call)
+			}
 			thread.Add(Message{Role: RoleTool, Content: content, ToolCallID: call.ID, Name: call.Name})
+			h.debugf("step=%d/%d event=tool_finish tool=%q call_id=%q", step, maxSteps, call.Name, call.ID)
 		}
 	}
+	h.debugf("step=%d/%d event=max_steps", maxSteps, maxSteps)
 	return nil, ErrMaxSteps
+}
+
+// debugf writes one debug event when logging is enabled.
+// @param format printf-style event format.
+// @param args event values.
+// @return none.
+func (h *Harness) debugf(format string, args ...any) {
+	if h.debug != nil {
+		h.debug.Printf(format, args...)
+	}
 }
 
 // executeTool invokes one tool and serializes its result.

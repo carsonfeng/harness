@@ -15,11 +15,18 @@ import (
 // @param none.
 // @return none.
 func main() {
-	model := openai.NewChatCompletions(openai.Config{
+	config := openai.Config{
 		APIKey: os.Getenv("OPENAI_API_KEY"),
 		Model:  required("OPENAI_MODEL"),
-	})
-	agent := harness.New(harness.WithModel(model))
+	}
+	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
+		config.BaseURL = baseURL
+	}
+	model := openai.NewChatCompletions(config)
+	agent := harness.New(
+		harness.WithModel(model),
+		harness.WithDebug(os.Stderr),
+	)
 	result, err := agent.Run(context.Background(), "Explain goroutines in one sentence.")
 	if err != nil {
 		log.Fatal(err)
