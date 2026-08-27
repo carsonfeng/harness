@@ -218,6 +218,10 @@ The adapter:
 - Converts tool calls to `tool_use` content blocks.
 - Groups consecutive tool results into the immediately following `user/tool_result` message.
 
+Choose the adapter by endpoint protocol, not model name. If a gateway serves a
+Claude model through an OpenAI-compatible API, use the matching OpenAI adapter
+instead of `anthropic.New`.
+
 `Version` defaults to `2023-06-01`; `MaxTokens` defaults to `4096`.
 
 ## Custom hosts
@@ -641,6 +645,16 @@ Run static analysis:
 ```bash
 go vet ./...
 ```
+
+Automatically increment the latest SemVer patch, create an annotated tag, and
+push it to GitHub:
+
+```bash
+make tag m="Add skill support"
+```
+
+The first tag is `v0.1.0`; later runs increment the patch version. Tests run
+before publishing, and the working tree must be committed first.
 
 Functions use a compact contract comment format:
 

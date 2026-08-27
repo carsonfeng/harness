@@ -218,6 +218,10 @@ model := anthropic.New(anthropic.Config{
 - 把 Tool Call 转换为 `tool_use` 内容块。
 - 把连续的 Tool Result 合并为紧随其后的 `user/tool_result` 消息。
 
+Adapter 应按 Endpoint 暴露的协议选择，而不是按模型品牌选择。如果网关通过
+OpenAI 兼容 API 提供 Claude 模型，应使用对应的 OpenAI Adapter，而不是
+`anthropic.New`。
+
 `Version` 默认是 `2023-06-01`，`MaxTokens` 默认是 `4096`。
 
 ## 自定义 Host
@@ -633,6 +637,15 @@ go test -race ./...
 ```bash
 go vet ./...
 ```
+
+自动递增最新 SemVer 的 Patch 版本，创建 Annotated Tag 并推送到 GitHub：
+
+```bash
+make tag m="支持 Skill"
+```
+
+第一次发布使用 `v0.1.0`，后续自动递增 Patch 版本。推送前会运行测试，并要求先
+提交工作区中的修改。
 
 项目中的函数注释使用简短契约格式：
 

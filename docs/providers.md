@@ -4,6 +4,11 @@ The built-in adapters use `net/http` and add no third-party dependencies. Each
 implements `model.Model`, so switching APIs does not change tools, skills, or the
 agent loop.
 
+Choose an adapter by the HTTP protocol exposed by the endpoint, not by the
+model's brand. A Claude model served through an OpenAI-compatible gateway must
+use `openai.NewChatCompletions` or `openai.NewResponses`; use `anthropic.New`
+only for an Anthropic Messages-compatible endpoint.
+
 ## OpenAI Chat Completions
 
 ```go
@@ -95,3 +100,9 @@ take precedence over entries with the same name.
 Non-2xx errors include the status code and a bounded response body. Configure
 timeouts through `HTTPClient`. Request cancellation always follows the context
 passed to `Harness.Run` or `Harness.RunThread`.
+
+If an Anthropic-configured custom host returns an error mentioning
+`previous_response_id`, the host is exposing or internally requiring OpenAI
+Responses continuation semantics. Harness's Anthropic adapter never sends that
+field; select the OpenAI Responses adapter or the gateway's Anthropic
+Messages-compatible route.
