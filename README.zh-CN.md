@@ -34,7 +34,7 @@ Harness 只提供构建 Agent 最必要的能力：
 - 支持通过复用 Thread 完成用户多轮对话
 - 支持模型自动发现 `SKILL.md`，并在激活后应用 Tool 白名单和独立步数限制
 - 保存完整的模型、工具调用和工具结果记录
-- 可选的纯元数据 Debug Logging，覆盖 Agent Loop 的每一步
+- 可选的完整 Debug Logging，记录每一步请求、响应和 Tool 数据
 - 支持 Context 取消
 - Go 1.21+
 - 核心零第三方依赖
@@ -385,7 +385,7 @@ go func() {
 
 ## Debug Logging
 
-诊断耗时较长或可能循环的运行时，可以开启简洁的进度日志：
+诊断运行过程时，可以开启完整的 Agent Loop 日志：
 
 ```go
 agent := harness.New(
@@ -394,15 +394,23 @@ agent := harness.New(
 )
 ```
 
-Agent Loop 的每一步都会报告当前步数和上限，以及模型请求与响应、Tool 开始与结束、Skill 激活、完成、取消或达到步数上限等事件。日志只包含计数、名称和 Call ID，不会记录 Prompt、Tool Arguments、Tool Results 或模型文本。
+每一步都会打印完整的 Provider-neutral `ModelRequest`，包括全部 Messages、Prompt、
+Tool 定义和 JSON Schema；同时打印完整 `ModelResponse`、Tool Call Arguments、Tool
+Results、Skill 激活、错误、完成、取消及步数上限事件。
 
 ```text
-harness: 2026/08/26 12:00:00 step=1/20 event=model_request messages=2 tools=4 skill=""
-harness: 2026/08/26 12:00:01 step=1/20 event=model_response tool_calls=1 final=false
-harness: 2026/08/26 12:00:01 step=1/20 event=tool_start tool="get_weather" call_id="call_123"
+harness: 2026/08/27 12:00:00 step=1/20 event=model_request_data
+{
+  "messages": [{"role":"user","content":"广州天气怎么样？"}],
+  "tools": [{"name":"get_weather","parameters":{"type":"object"}}]
+}
+harness: 2026/08/27 12:00:01 step=1/20 event=model_response_data
+{"tool_calls":[{"id":"call_123","name":"get_weather","arguments":{"city":"Guangzhou"}}]}
 ```
 
-Debug Logging 默认关闭。向 `WithDebug` 传入 nil 可以显式关闭。所有可运行示例都会开启 Debug Logging，并写入标准错误输出。
+Debug Logging 默认关闭。向 `WithDebug` 传入 nil 可以显式关闭。所有可运行示例都会
+开启 Debug Logging，并写入标准错误输出。日志可能包含敏感的用户数据和 Tool 数据，
+应按敏感日志进行存储和访问控制。
 
 ## Thread 与 Result
 
@@ -460,7 +468,7 @@ Harness 只会在空 Thread 中注入 System Instructions。恢复非空 Thread 
 - `RunThread` 收到 nil 时返回 `harness.ErrNilThread`。
 - 同一个 Thread 重叠运行时返回 `harness.ErrThreadBusy`。
 - Tool 定义会按名称排序，确保发送给模型的请求稳定。
-- 使用 `WithDebug` 可以观察模型循环的每一步，而不会记录消息内容。
+- 使用 `WithDebug` 可以打印模型循环每一步的请求、响应和 Tool Payload。
 
 配置 System Prompt 和步数：
 

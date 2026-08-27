@@ -82,7 +82,7 @@ func TestMaxSteps(t *testing.T) {
 	}
 }
 
-// TestDebugLogsLoopProgress verifies concise metadata-only progress events.
+// TestDebugLogsLoopProgress verifies full request, response, and tool payloads.
 // @param t test state.
 // @return none.
 func TestDebugLogsLoopProgress(t *testing.T) {
@@ -111,18 +111,21 @@ func TestDebugLogsLoopProgress(t *testing.T) {
 	output := logs.String()
 	for _, want := range []string{
 		"step=1/20 event=model_request",
+		"step=1/20 event=model_request_data",
 		"step=1/20 event=model_response tool_calls=1 final=false",
+		"step=1/20 event=model_response_data",
 		`event=tool_start tool="inspect" call_id="call-1"`,
+		"step=1/20 event=tool_call_data",
+		"step=1/20 event=tool_result_data",
 		"step=2/20 event=model_request",
 		"step=2/20 event=complete",
+		"prompt-secret",
+		"tool-secret",
+		"result-secret",
+		"answer-secret",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("debug output missing %q:\n%s", want, output)
-		}
-	}
-	for _, secret := range []string{"prompt-secret", "tool-secret", "result-secret", "answer-secret"} {
-		if strings.Contains(output, secret) {
-			t.Fatalf("debug output leaked %q:\n%s", secret, output)
 		}
 	}
 }

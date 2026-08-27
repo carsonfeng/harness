@@ -54,7 +54,8 @@ func WithMaxSteps(steps int) Option {
 	}
 }
 
-// WithDebug writes concise agent-loop progress to output. A nil output disables it.
+// WithDebug writes full agent-loop requests, responses, and tool data to output.
+// A nil output disables it. Debug output may contain sensitive application data.
 // @param output debug log destination.
 // @return harness option.
 func WithDebug(output io.Writer) Option {
@@ -248,13 +249,16 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 			skillName = active.Name
 		}
 		requestMessages := thread.Messages()
-		h.debugf("step=%d/%d event=model_request messages=%d tools=%d skill=%q", step, maxSteps, len(requestMessages), len(definitions), skillName)
-		response, err := h.model.Generate(ctx, ModelRequest{Messages: requestMessages, Tools: definitions})
+		request := ModelRequest{Messages: requestMessages, Tools: definitions}
+		h.debugf("step=%d/%d event=model_request skill=%q", step, maxSteps, skillName)
+		h.debugJSON(step, maxSteps, "model_request_data", request)
+		response, err := h.model.Generate(ctx, request)
 		if err != nil {
-			h.debugf("step=%d/%d event=model_error error_type=%T", step, maxSteps, err)
+			h.debugf("step=%d/%d event=model_error error=%q", step, maxSteps, err)
 			return nil, fmt.Errorf("harness: generate step %d: %w", step, err)
 		}
 		h.debugf("step=%d/%d event=model_response tool_calls=%d final=%t", step, maxSteps, len(response.ToolCalls), len(response.ToolCalls) == 0)
+		h.debugJSON(step, maxSteps, "model_response_data", response)
 		thread.Add(Message{Role: RoleAssistant, Content: response.Text, ToolCalls: response.ToolCalls})
 		if len(response.ToolCalls) == 0 {
 			h.debugf("step=%d/%d event=complete", step, maxSteps)
@@ -272,6 +276,7 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 			content := errorResult(errors.New("load_skill must be the only tool call in its model turn"))
 			for _, call := range response.ToolCalls {
 				thread.Add(Message{Role: RoleTool, Content: content, ToolCallID: call.ID, Name: call.Name})
+				h.debugToolResult(step, maxSteps, call, content)
 			}
 			continue
 		}
@@ -281,6 +286,7 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 				return nil, err
 			}
 			h.debugf("step=%d/%d event=tool_start tool=%q call_id=%q", step, maxSteps, call.Name, call.ID)
+			h.debugJSON(step, maxSteps, "tool_call_data", call)
 			var content string
 			if call.Name == skillToolName {
 				if active != nil {
@@ -311,6 +317,7 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 				content = executeTool(ctx, selected, call)
 			}
 			thread.Add(Message{Role: RoleTool, Content: content, ToolCallID: call.ID, Name: call.Name})
+			h.debugToolResult(step, maxSteps, call, content)
 			h.debugf("step=%d/%d event=tool_finish tool=%q call_id=%q", step, maxSteps, call.Name, call.ID)
 		}
 	}
@@ -326,6 +333,42 @@ func (h *Harness) debugf(format string, args ...any) {
 	if h.debug != nil {
 		h.debug.Printf(format, args...)
 	}
+}
+
+// debugJSON writes one pretty-printed debug payload.
+// @param step current model step.
+// @param maxSteps current model-step limit.
+// @param event debug event name.
+// @param value payload to encode.
+// @return none.
+func (h *Harness) debugJSON(step, maxSteps int, event string, value any) {
+	if h.debug == nil {
+		return
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		h.debug.Printf("step=%d/%d event=%s encode_error=%q", step, maxSteps, event, err)
+		return
+	}
+	h.debug.Printf("step=%d/%d event=%s\n%s", step, maxSteps, event, encoded)
+}
+
+// debugToolResult writes one decoded tool result payload.
+// @param step current model step.
+// @param maxSteps current model-step limit.
+// @param call completed tool call.
+// @param content serialized tool result.
+// @return none.
+func (h *Harness) debugToolResult(step, maxSteps int, call ToolCall, content string) {
+	var result any
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		result = content
+	}
+	h.debugJSON(step, maxSteps, "tool_result_data", map[string]any{
+		"call_id": call.ID,
+		"result":  result,
+		"tool":    call.Name,
+	})
 }
 
 // executeTool invokes one tool and serializes its result.

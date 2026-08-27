@@ -34,7 +34,7 @@ It is not a workflow engine, RAG framework, hosted platform, or multi-agent syst
 - Reusable Threads for user multi-turn conversations
 - Automatic model-driven `SKILL.md` discovery, post-activation tool allowlists, and per-skill step limits
 - Complete model, tool-call, and tool-result history
-- Opt-in metadata-only debug logging for every agent-loop step
+- Opt-in full request, response, and Tool debug logging for every agent-loop step
 - Context cancellation
 - Go 1.21+
 - Zero third-party dependencies in the core
@@ -389,7 +389,7 @@ Wrapping `Run` in a goroutine only moves the blocking call to the caller's gorou
 
 ## Debug logging
 
-Enable concise progress logs when diagnosing a long or looping run:
+Enable complete agent-loop logs when diagnosing a run:
 
 ```go
 agent := harness.New(
@@ -398,19 +398,24 @@ agent := harness.New(
 )
 ```
 
-Each loop reports its current step and limit, model request/response state, Tool
-start/finish events, Skill activation, completion, cancellation, or the step
-limit. Logs contain counts, names, and call IDs, but not prompts, Tool arguments,
-Tool results, or model text.
+Each loop prints the complete provider-neutral `ModelRequest`, including all
+Messages, prompts, Tool definitions, and JSON Schemas. It also prints the full
+`ModelResponse`, Tool Call arguments, Tool Results, Skill activation, errors,
+completion, cancellation, and step limit.
 
 ```text
-harness: 2026/08/26 12:00:00 step=1/20 event=model_request messages=2 tools=4 skill=""
-harness: 2026/08/26 12:00:01 step=1/20 event=model_response tool_calls=1 final=false
-harness: 2026/08/26 12:00:01 step=1/20 event=tool_start tool="get_weather" call_id="call_123"
+harness: 2026/08/27 12:00:00 step=1/20 event=model_request_data
+{
+  "messages": [{"role":"user","content":"What is the weather?"}],
+  "tools": [{"name":"get_weather","parameters":{"type":"object"}}]
+}
+harness: 2026/08/27 12:00:01 step=1/20 event=model_response_data
+{"tool_calls":[{"id":"call_123","name":"get_weather","arguments":{"city":"Guangzhou"}}]}
 ```
 
 Debug logging is disabled by default. Pass nil to `WithDebug` to disable it
-explicitly. All runnable examples enable it and write to standard error.
+explicitly. All runnable examples enable it and write to standard error. Debug
+logs may contain sensitive user and Tool data; protect them accordingly.
 
 ## Thread and Result
 
@@ -468,7 +473,7 @@ If a run fails after it has started, its Thread may contain partial history. Ins
 - Passing nil to `RunThread` returns `harness.ErrNilThread`.
 - Overlapping runs on one Thread return `harness.ErrThreadBusy`.
 - Tool definitions are sorted by name for deterministic model requests.
-- Use `WithDebug` to observe every model-loop step without logging message contents.
+- Use `WithDebug` to print every model-loop request, response, and Tool payload.
 
 Configure system instructions and a step limit:
 
