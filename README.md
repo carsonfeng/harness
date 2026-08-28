@@ -34,7 +34,7 @@ It is not a workflow engine, RAG framework, hosted platform, or multi-agent syst
 - Reusable Threads for user multi-turn conversations
 - Automatic model-driven `SKILL.md` discovery, post-activation tool allowlists, and per-skill step limits
 - Complete model, tool-call, and tool-result history
-- Opt-in full request, response, and Tool debug logging for every agent-loop step
+- Opt-in incremental debug logging with detailed Tool and Skill calls
 - Context cancellation
 - Go 1.21+
 - Zero third-party dependencies in the core
@@ -389,7 +389,7 @@ Wrapping `Run` in a goroutine only moves the blocking call to the caller's gorou
 
 ## Debug logging
 
-Enable complete agent-loop logs when diagnosing a run:
+Enable compact agent-loop logs when diagnosing a run:
 
 ```go
 agent := harness.New(
@@ -398,19 +398,25 @@ agent := harness.New(
 )
 ```
 
-Each loop prints the complete provider-neutral `ModelRequest`, including all
-Messages, prompts, Tool definitions, and JSON Schemas. It also prints the full
-`ModelResponse`, Tool Call arguments, Tool Results, Skill activation, errors,
-completion, cancellation, and step limit.
+Each model request prints only Messages added since the previous request, so a
+multi-turn Thread does not repeat its full history. Available Tools are shown by
+name. Tool and Skill calls include their complete names and JSON arguments.
+Model text and Tool Results use a 500-character preview. Successful Skill loads
+show the Skill name, allowlist, and step limit without repeating its full
+instructions.
 
 ```text
-harness: 2026/08/27 12:00:00 step=1/20 event=model_request_data
-{
-  "messages": [{"role":"user","content":"What is the weather?"}],
-  "tools": [{"name":"get_weather","parameters":{"type":"object"}}]
-}
-harness: 2026/08/27 12:00:01 step=1/20 event=model_response_data
-{"tool_calls":[{"id":"call_123","name":"get_weather","arguments":{"city":"Guangzhou"}}]}
+harness: 2026/08/29 12:00:00 step=1/20 event=model_request skill="" added_messages=1 total_messages=9 tools=["get_weather"]
+harness: 2026/08/29 12:00:00 step=1/20 event=model_request_delta
+[
+  {
+    "role": "user",
+    "content": "How about Shenzhen?"
+  }
+]
+harness: 2026/08/29 12:00:01 step=1/20 event=tool_call tool="get_weather" call_id="call_123"
+harness: 2026/08/29 12:00:01 step=1/20 event=tool_arguments
+{"arguments":{"city":"Shenzhen"},"call_id":"call_123","tool":"get_weather"}
 ```
 
 Debug logging is disabled by default. Pass nil to `WithDebug` to disable it
@@ -473,7 +479,7 @@ If a run fails after it has started, its Thread may contain partial history. Ins
 - Passing nil to `RunThread` returns `harness.ErrNilThread`.
 - Overlapping runs on one Thread return `harness.ErrThreadBusy`.
 - Tool definitions are sorted by name for deterministic model requests.
-- Use `WithDebug` to print every model-loop request, response, and Tool payload.
+- Use `WithDebug` for incremental Messages and detailed Tool or Skill calls.
 
 Configure system instructions and a step limit:
 

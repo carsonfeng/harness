@@ -24,6 +24,7 @@ var (
 )
 
 const defaultMaxSteps = 20
+const debugPreviewLimit = 500
 
 // Option configures a Harness.
 // @param harness harness being configured.
@@ -54,7 +55,7 @@ func WithMaxSteps(steps int) Option {
 	}
 }
 
-// WithDebug writes full agent-loop requests, responses, and tool data to output.
+// WithDebug writes incremental agent-loop messages and detailed tool calls.
 // A nil output disables it. Debug output may contain sensitive application data.
 // @param output debug log destination.
 // @return harness option.
@@ -221,6 +222,7 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 		return nil, err
 	}
 	messages := thread.Messages()
+	debugMessageOffset := len(messages)
 	skills := h.skillSnapshot()
 	active, err := activeSkill(messages)
 	if err != nil {
@@ -250,15 +252,24 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 		}
 		requestMessages := thread.Messages()
 		request := ModelRequest{Messages: requestMessages, Tools: definitions}
-		h.debugf("step=%d/%d event=model_request skill=%q", step, maxSteps, skillName)
-		h.debugJSON(step, maxSteps, "model_request_data", request)
+		addedMessages := requestMessages[debugMessageOffset:]
+		debugMessageOffset = len(requestMessages)
+		h.debugf("step=%d/%d event=model_request skill=%q added_messages=%d total_messages=%d tools=%q", step, maxSteps, skillName, len(addedMessages), len(requestMessages), toolDefinitionNames(definitions))
+		h.debugJSON(step, maxSteps, "model_request_delta", compactDebugMessages(addedMessages))
 		response, err := h.model.Generate(ctx, request)
 		if err != nil {
 			h.debugf("step=%d/%d event=model_error error=%q", step, maxSteps, err)
 			return nil, fmt.Errorf("harness: generate step %d: %w", step, err)
 		}
-		h.debugf("step=%d/%d event=model_response tool_calls=%d final=%t", step, maxSteps, len(response.ToolCalls), len(response.ToolCalls) == 0)
-		h.debugJSON(step, maxSteps, "model_response_data", response)
+		h.debugf("step=%d/%d event=model_response tool_calls=%d final=%t text=%q", step, maxSteps, len(response.ToolCalls), len(response.ToolCalls) == 0, debugPreview(response.Text))
+		for _, call := range response.ToolCalls {
+			h.debugf("step=%d/%d event=tool_call tool=%q call_id=%q", step, maxSteps, call.Name, call.ID)
+			h.debugJSON(step, maxSteps, "tool_arguments", map[string]any{
+				"arguments": call.Arguments,
+				"call_id":   call.ID,
+				"tool":      call.Name,
+			})
+		}
 		thread.Add(Message{Role: RoleAssistant, Content: response.Text, ToolCalls: response.ToolCalls})
 		if len(response.ToolCalls) == 0 {
 			h.debugf("step=%d/%d event=complete", step, maxSteps)
@@ -286,7 +297,6 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 				return nil, err
 			}
 			h.debugf("step=%d/%d event=tool_start tool=%q call_id=%q", step, maxSteps, call.Name, call.ID)
-			h.debugJSON(step, maxSteps, "tool_call_data", call)
 			var content string
 			if call.Name == skillToolName {
 				if active != nil {
@@ -309,7 +319,7 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 								budget = active.MaxSteps
 							}
 							maxSteps = step + budget
-							h.debugf("step=%d/%d event=skill_activated skill=%q tools=%d budget=%d", step, maxSteps, active.Name, len(definitions), budget)
+							h.debugf("step=%d/%d event=skill_activated skill=%q allowed_tools=%q budget=%d", step, maxSteps, active.Name, active.Tools, budget)
 						}
 					}
 				}
@@ -323,6 +333,63 @@ func (h *Harness) runThread(ctx context.Context, thread *Thread, input string) (
 	}
 	h.debugf("step=%d/%d event=max_steps", maxSteps, maxSteps)
 	return nil, ErrMaxSteps
+}
+
+type debugMessage struct {
+	Role       Role               `json:"role"`
+	Content    string             `json:"content,omitempty"`
+	ToolCalls  []debugToolCallRef `json:"tool_calls,omitempty"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	Name       string             `json:"name,omitempty"`
+}
+
+type debugToolCallRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// compactDebugMessages removes repeated payloads already logged elsewhere.
+// @param messages newly added conversation messages.
+// @return compact message summaries.
+func compactDebugMessages(messages []Message) []debugMessage {
+	result := make([]debugMessage, 0, len(messages))
+	for _, message := range messages {
+		item := debugMessage{
+			Role:       message.Role,
+			ToolCallID: message.ToolCallID,
+			Name:       message.Name,
+		}
+		if message.Role == RoleSystem || message.Role == RoleUser {
+			item.Content = message.Content
+		}
+		for _, call := range message.ToolCalls {
+			item.ToolCalls = append(item.ToolCalls, debugToolCallRef{ID: call.ID, Name: call.Name})
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+// toolDefinitionNames returns model-visible tool names.
+// @param definitions available tool definitions.
+// @return names in request order.
+func toolDefinitionNames(definitions []ToolDefinition) []string {
+	names := make([]string, len(definitions))
+	for i, definition := range definitions {
+		names[i] = definition.Name
+	}
+	return names
+}
+
+// debugPreview truncates verbose text while preserving valid UTF-8.
+// @param value text to summarize.
+// @return original or truncated text.
+func debugPreview(value string) string {
+	runes := []rune(value)
+	if len(runes) <= debugPreviewLimit {
+		return value
+	}
+	return string(runes[:debugPreviewLimit]) + fmt.Sprintf("… [truncated %d chars]", len(runes)-debugPreviewLimit)
 }
 
 // debugf writes one debug event when logging is enabled.
@@ -360,15 +427,14 @@ func (h *Harness) debugJSON(step, maxSteps int, event string, value any) {
 // @param content serialized tool result.
 // @return none.
 func (h *Harness) debugToolResult(step, maxSteps int, call ToolCall, content string) {
-	var result any
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		result = content
+	if call.Name == skillToolName {
+		var activation skillActivation
+		if json.Unmarshal([]byte(content), &activation) == nil && activation.Name != "" {
+			h.debugf("step=%d/%d event=skill_result skill=%q allowed_tools=%q max_steps=%d", step, maxSteps, activation.Name, activation.Tools, activation.MaxSteps)
+			return
+		}
 	}
-	h.debugJSON(step, maxSteps, "tool_result_data", map[string]any{
-		"call_id": call.ID,
-		"result":  result,
-		"tool":    call.Name,
-	})
+	h.debugf("step=%d/%d event=tool_result tool=%q call_id=%q result=%s", step, maxSteps, call.Name, call.ID, debugPreview(content))
 }
 
 // executeTool invokes one tool and serializes its result.

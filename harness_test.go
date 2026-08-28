@@ -91,9 +91,12 @@ func TestDebugLogsLoopProgress(t *testing.T) {
 	model := ModelFunc(func(context.Context, ModelRequest) (ModelResponse, error) {
 		turn++
 		if turn == 1 {
-			return ModelResponse{ToolCalls: []ToolCall{{ID: "call-1", Name: "inspect", Arguments: json.RawMessage(`{"token":"tool-secret"}`)}}}, nil
+			return ModelResponse{ToolCalls: []ToolCall{{ID: "call-1", Name: "inspect", Arguments: json.RawMessage(`{"token":"tool-argument-value"}`)}}}, nil
 		}
-		return ModelResponse{Text: "answer-secret"}, nil
+		if turn == 2 {
+			return ModelResponse{Text: "first-answer-value"}, nil
+		}
+		return ModelResponse{Text: "second-answer-value"}, nil
 	})
 	type args struct {
 		Token string `json:"token"`
@@ -102,30 +105,42 @@ func TestDebugLogsLoopProgress(t *testing.T) {
 		WithModel(model),
 		WithDebug(&logs),
 		WithTools(Func("inspect", "Inspect input", func(context.Context, args) (string, error) {
-			return "result-secret", nil
+			return "tool-result-value", nil
 		})),
 	)
-	if _, err := agent.Run(context.Background(), "prompt-secret"); err != nil {
+	first, err := agent.Run(context.Background(), "first-prompt-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.RunThread(context.Background(), first.Thread, "second-prompt-value"); err != nil {
 		t.Fatal(err)
 	}
 	output := logs.String()
 	for _, want := range []string{
 		"step=1/20 event=model_request",
-		"step=1/20 event=model_request_data",
-		"step=1/20 event=model_response tool_calls=1 final=false",
-		"step=1/20 event=model_response_data",
+		"step=1/20 event=model_request_delta",
+		`tools=["inspect"]`,
+		"step=1/20 event=model_response tool_calls=1 final=false text=\"\"",
+		`event=tool_call tool="inspect" call_id="call-1"`,
 		`event=tool_start tool="inspect" call_id="call-1"`,
-		"step=1/20 event=tool_call_data",
-		"step=1/20 event=tool_result_data",
+		"step=1/20 event=tool_arguments",
+		`event=tool_result tool="inspect" call_id="call-1" result="tool-result-value"`,
 		"step=2/20 event=model_request",
 		"step=2/20 event=complete",
-		"prompt-secret",
-		"tool-secret",
-		"result-secret",
-		"answer-secret",
+		"first-prompt-value",
+		"second-prompt-value",
+		"tool-argument-value",
+		"tool-result-value",
+		"first-answer-value",
+		"second-answer-value",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("debug output missing %q:\n%s", want, output)
+		}
+	}
+	for _, value := range []string{"first-prompt-value", "second-prompt-value", "tool-argument-value", "tool-result-value", "first-answer-value", "second-answer-value"} {
+		if count := strings.Count(output, value); count != 1 {
+			t.Fatalf("debug output contains %q %d times, want 1:\n%s", value, count, output)
 		}
 	}
 }
@@ -135,6 +150,7 @@ func TestDebugLogsLoopProgress(t *testing.T) {
 // @return none.
 func TestRunAutomaticallyLoadsSkillAndPersistsPolicy(t *testing.T) {
 	turn := 0
+	var logs bytes.Buffer
 	model := ModelFunc(func(_ context.Context, req ModelRequest) (ModelResponse, error) {
 		turn++
 		switch turn {
@@ -174,6 +190,7 @@ func TestRunAutomaticallyLoadsSkillAndPersistsPolicy(t *testing.T) {
 	type empty struct{}
 	h := New(
 		WithModel(model),
+		WithDebug(&logs),
 		WithSystem("base"),
 		WithTools(
 			Func("allowed", "", func(context.Context, empty) (string, error) { return "ok", nil }),
@@ -200,6 +217,20 @@ func TestRunAutomaticallyLoadsSkillAndPersistsPolicy(t *testing.T) {
 	}
 	if continued.Text != "continued" || continued.Steps != 1 {
 		t.Fatalf("continued = %#v", continued)
+	}
+	output := logs.String()
+	for _, want := range []string{
+		`event=tool_call tool="load_skill" call_id="skill-1"`,
+		`"name": "review"`,
+		`event=skill_activated skill="review" allowed_tools=["allowed"] budget=2`,
+		`event=skill_result skill="review" allowed_tools=["allowed"] max_steps=2`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("skill debug output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "review carefully") {
+		t.Fatalf("skill debug output leaked instructions:\n%s", output)
 	}
 }
 

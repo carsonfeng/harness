@@ -34,7 +34,7 @@ Harness 只提供构建 Agent 最必要的能力：
 - 支持通过复用 Thread 完成用户多轮对话
 - 支持模型自动发现 `SKILL.md`，并在激活后应用 Tool 白名单和独立步数限制
 - 保存完整的模型、工具调用和工具结果记录
-- 可选的完整 Debug Logging，记录每一步请求、响应和 Tool 数据
+- 可选的增量 Debug Logging，详细记录 Tool 和 Skill 调用
 - 支持 Context 取消
 - Go 1.21+
 - 核心零第三方依赖
@@ -385,7 +385,7 @@ go func() {
 
 ## Debug Logging
 
-诊断运行过程时，可以开启完整的 Agent Loop 日志：
+诊断运行过程时，可以开启精简的 Agent Loop 日志：
 
 ```go
 agent := harness.New(
@@ -394,18 +394,23 @@ agent := harness.New(
 )
 ```
 
-每一步都会打印完整的 Provider-neutral `ModelRequest`，包括全部 Messages、Prompt、
-Tool 定义和 JSON Schema；同时打印完整 `ModelResponse`、Tool Call Arguments、Tool
-Results、Skill 激活、错误、完成、取消及步数上限事件。
+每次模型请求只打印相对上一次请求新增的 Messages，多轮对话不会重复输出全部历史。
+可用 Tool 以名称展示；Tool 和 Skill 调用会保留完整名称及 JSON Arguments。模型文本
+和 Tool Result 最多预览 500 个字符。Skill 加载成功后只显示名称、Tool 白名单和步数，
+不会重复打印整段 Instructions。
 
 ```text
-harness: 2026/08/27 12:00:00 step=1/20 event=model_request_data
-{
-  "messages": [{"role":"user","content":"广州天气怎么样？"}],
-  "tools": [{"name":"get_weather","parameters":{"type":"object"}}]
-}
-harness: 2026/08/27 12:00:01 step=1/20 event=model_response_data
-{"tool_calls":[{"id":"call_123","name":"get_weather","arguments":{"city":"Guangzhou"}}]}
+harness: 2026/08/29 12:00:00 step=1/20 event=model_request skill="" added_messages=1 total_messages=9 tools=["get_weather"]
+harness: 2026/08/29 12:00:00 step=1/20 event=model_request_delta
+[
+  {
+    "role": "user",
+    "content": "那深圳呢？"
+  }
+]
+harness: 2026/08/29 12:00:01 step=1/20 event=tool_call tool="get_weather" call_id="call_123"
+harness: 2026/08/29 12:00:01 step=1/20 event=tool_arguments
+{"arguments":{"city":"Shenzhen"},"call_id":"call_123","tool":"get_weather"}
 ```
 
 Debug Logging 默认关闭。向 `WithDebug` 传入 nil 可以显式关闭。所有可运行示例都会
@@ -468,7 +473,7 @@ Harness 只会在空 Thread 中注入 System Instructions。恢复非空 Thread 
 - `RunThread` 收到 nil 时返回 `harness.ErrNilThread`。
 - 同一个 Thread 重叠运行时返回 `harness.ErrThreadBusy`。
 - Tool 定义会按名称排序，确保发送给模型的请求稳定。
-- 使用 `WithDebug` 可以打印模型循环每一步的请求、响应和 Tool Payload。
+- 使用 `WithDebug` 可以查看增量 Messages，以及详细的 Tool 或 Skill 调用。
 
 配置 System Prompt 和步数：
 

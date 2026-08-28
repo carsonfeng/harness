@@ -23,8 +23,8 @@ Set `OPENAI_MODEL` and, for official OpenAI, `OPENAI_API_KEY`. Set the optional
 example uses the equivalent `ANTHROPIC_*` variables.
 
 Every example enables `harness.WithDebug(os.Stderr)`, so model-loop progress is
-visible while the final answer remains on standard output. Debug output includes
-full prompts, model responses, Tool arguments, and Tool results.
+visible while the final answer remains on standard output. Debug output shows
+incremental Messages, full Tool arguments, and compact response/result previews.
 
 Examples intentionally read model IDs from environment variables. This avoids
 silently pinning applications to a model that may not be enabled for their
