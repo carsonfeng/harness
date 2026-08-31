@@ -23,6 +23,7 @@ func (c *Client) Tools(ctx context.Context) ([]tool.Tool, error) {
 	}
 	c.discoverMu.Lock()
 	defer c.discoverMu.Unlock()
+	c.debugf("event=discovery_start")
 	c.mu.RLock()
 	mode := c.mode
 	c.mu.RUnlock()
@@ -33,8 +34,13 @@ func (c *Client) Tools(ctx context.Context) ([]tool.Tool, error) {
 			c.mode = modeModern
 			c.protocolVersion = modernProtocolVersion
 			c.mu.Unlock()
-			return c.wrapTools(definitions)
+			wrapped, err := c.wrapTools(definitions)
+			if err == nil {
+				c.debugf("event=discovery_finish protocol=%q tools=%q", modernProtocolVersion, definitionNames(definitions))
+			}
+			return wrapped, err
 		}
+		c.debugf("event=protocol_fallback from=%q error=%q", modernProtocolVersion, c.debugError(modernErr))
 		if initErr := c.initializeLegacy(ctx); initErr != nil {
 			return nil, fmt.Errorf("mcp: modern discovery failed: %v; legacy initialization failed: %w", modernErr, initErr)
 		}
@@ -44,7 +50,11 @@ func (c *Client) Tools(ctx context.Context) ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.wrapTools(definitions)
+	wrapped, err := c.wrapTools(definitions)
+	if err == nil {
+		c.debugf("event=discovery_finish protocol=%q tools=%q", c.negotiatedProtocol(), definitionNames(definitions))
+	}
+	return wrapped, err
 }
 
 // initializeLegacy establishes an MCP 2025 session.
@@ -88,6 +98,7 @@ func (c *Client) initializeLegacy(ctx context.Context) error {
 		c.mu.Unlock()
 		return fmt.Errorf("mcp: send initialized notification: %w", err)
 	}
+	c.debugf("event=initialized protocol=%q session=%t", result.ProtocolVersion, headers.Get("Mcp-Session-Id") != "")
 	return nil
 }
 
@@ -108,6 +119,7 @@ func (c *Client) listAll(ctx context.Context, mode protocolMode) ([]remoteDefini
 			return nil, fmt.Errorf("mcp: list tools: %w", err)
 		}
 		definitions = append(definitions, page.Tools...)
+		c.debugf("event=tools_list protocol=%q tools=%q next_cursor=%t", c.protocolName(mode), definitionNames(page.Tools), page.NextCursor != "")
 		if page.NextCursor == "" {
 			return definitions, nil
 		}
@@ -167,18 +179,22 @@ func (t *remoteTool) Definition() model.ToolDefinition { return t.definition }
 func (t *remoteTool) Execute(ctx context.Context, arguments json.RawMessage) (any, error) {
 	var decoded map[string]any
 	if len(arguments) == 0 {
+		arguments = json.RawMessage("{}")
 		decoded = make(map[string]any)
 	} else if err := json.Unmarshal(arguments, &decoded); err != nil {
 		return nil, fmt.Errorf("mcp: decode tool arguments: %w", err)
 	}
 	mode := t.client.currentMode()
+	t.client.debugf("event=tool_call tool=%q arguments=%s", t.remoteName, string(arguments))
 	var result callToolResult
 	if err := t.client.call(ctx, "tools/call", t.remoteName, map[string]any{
 		"name":      t.remoteName,
 		"arguments": decoded,
 	}, mode, &result); err != nil {
+		t.client.debugf("event=tool_error tool=%q error=%q", t.remoteName, t.client.debugError(err))
 		return nil, fmt.Errorf("mcp: call %s: %w", t.remoteName, err)
 	}
+	t.client.debugf("event=tool_result tool=%q is_error=%t result=%s", t.remoteName, result.IsError, debugResult(result))
 	if result.IsError {
 		message := contentText(result.Content)
 		if message == "" {
@@ -202,6 +218,26 @@ func (c *Client) currentMode() protocolMode {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.mode
+}
+
+// negotiatedProtocol returns the server-selected protocol version.
+// @param c MCP client.
+// @return negotiated protocol version.
+func (c *Client) negotiatedProtocol() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.protocolVersion
+}
+
+// definitionNames returns remote MCP Tool names.
+// @param definitions remote definitions.
+// @return names in server order.
+func definitionNames(definitions []remoteDefinition) []string {
+	names := make([]string, len(definitions))
+	for index, definition := range definitions {
+		names[index] = definition.Name
+	}
+	return names
 }
 
 // contentText joins textual MCP content blocks.

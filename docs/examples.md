@@ -32,6 +32,8 @@ See the [MCP guide](mcp.md) for protocol compatibility and security guidance.
 Every example enables `harness.WithDebug(os.Stderr)`, so model-loop progress is
 visible while the final answer remains on standard output. Debug output shows
 incremental Messages, full Tool arguments, and compact response/result previews.
+The MCP example additionally shows protocol negotiation, Tool discovery, remote
+call arguments, and compact remote results.
 
 Examples intentionally read model IDs from environment variables. This avoids
 silently pinning applications to a model that may not be enabled for their

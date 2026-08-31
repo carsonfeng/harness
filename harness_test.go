@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -14,24 +15,38 @@ import (
 
 type mcpServerFunc func(context.Context) ([]Tool, error)
 
+type debugMCPServer struct {
+	mcpServerFunc
+	output io.Writer
+}
+
 // Tools invokes a test MCP discovery function.
 // @param ctx discovery cancellation context.
 // @return discovered tools or error.
 func (f mcpServerFunc) Tools(ctx context.Context) ([]Tool, error) { return f(ctx) }
 
+// SetDebug captures automatic MCP debug configuration.
+// @param output debug log destination.
+// @return none.
+func (s *debugMCPServer) SetDebug(output io.Writer) { s.output = output }
+
 // TestMCPRegistersDiscoveredTools verifies MCP registration in the root API.
 // @param t test state.
 // @return none.
 func TestMCPRegistersDiscoveredTools(t *testing.T) {
+	var logs bytes.Buffer
 	type empty struct{}
-	server := mcpServerFunc(func(context.Context) ([]Tool, error) {
+	server := &debugMCPServer{mcpServerFunc: mcpServerFunc(func(context.Context) ([]Tool, error) {
 		return []Tool{Func("remote", "Remote tool", func(context.Context, empty) (string, error) {
 			return "ok", nil
 		})}, nil
-	})
-	h := New()
+	})}
+	h := New(WithDebug(&logs))
 	if err := h.MCP(context.Background(), server); err != nil {
 		t.Fatal(err)
+	}
+	if server.output != &logs {
+		t.Fatal("Harness did not forward its debug output to the MCP server")
 	}
 	if len(h.tools.tools) != 1 || h.tools.tools["remote"] == nil {
 		t.Fatalf("registered tools = %#v", h.tools.tools)

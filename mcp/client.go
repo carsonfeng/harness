@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,7 @@ type Config struct {
 	ToolPrefix    string
 	ClientName    string
 	ClientVersion string
+	Debug         io.Writer
 }
 
 // Client discovers and calls tools from one MCP server.
@@ -33,6 +35,8 @@ type Client struct {
 	config     Config
 	nextID     atomic.Uint64
 	discoverMu sync.Mutex
+	debugMu    sync.RWMutex
+	debug      *log.Logger
 
 	mu              sync.RWMutex
 	mode            protocolMode
@@ -64,7 +68,9 @@ func New(config Config) *Client {
 		headers[name] = value
 	}
 	config.Headers = headers
-	return &Client{config: config}
+	client := &Client{config: config}
+	client.SetDebug(config.Debug)
+	return client
 }
 
 // validate checks configuration required by network operations.
@@ -112,12 +118,15 @@ func (c *Client) call(ctx context.Context, method, name string, params map[strin
 		params["_meta"] = c.clientInfo()
 	}
 	id := c.nextID.Add(1)
+	c.debugf("event=request method=%q tool=%q id=%d protocol=%q", method, name, id, c.protocolName(mode))
 	request := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	response, _, err := c.send(ctx, request, method, name, mode)
 	if err != nil {
+		c.debugf("event=request_error method=%q tool=%q id=%d error=%q", method, name, id, c.debugError(err))
 		return err
 	}
 	if response.Error != nil {
+		c.debugf("event=response_error method=%q tool=%q id=%d code=%d error=%q", method, name, id, response.Error.Code, c.debugError(response.Error))
 		return response.Error
 	}
 	if len(response.Result) == 0 {
@@ -126,6 +135,7 @@ func (c *Client) call(ctx context.Context, method, name string, params map[strin
 	if err := json.Unmarshal(response.Result, output); err != nil {
 		return fmt.Errorf("mcp: decode %s result: %w", method, err)
 	}
+	c.debugf("event=response method=%q tool=%q id=%d", method, name, id)
 	return nil
 }
 
@@ -135,6 +145,7 @@ func (c *Client) call(ctx context.Context, method, name string, params map[strin
 // @param mode protocol mode.
 // @return transport error.
 func (c *Client) notify(ctx context.Context, method string, mode protocolMode) error {
+	c.debugf("event=notification method=%q protocol=%q", method, c.protocolName(mode))
 	request := rpcRequest{JSONRPC: "2.0", Method: method}
 	_, _, err := c.send(ctx, request, method, "", mode)
 	return err

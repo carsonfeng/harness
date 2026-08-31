@@ -55,7 +55,7 @@ func WithMaxSteps(steps int) Option {
 	}
 }
 
-// WithDebug writes incremental agent-loop messages and detailed tool calls.
+// WithDebug writes incremental agent-loop, Tool, Skill, and MCP messages.
 // A nil output disables it. Debug output may contain sensitive application data.
 // @param output debug log destination.
 // @return harness option.
@@ -63,9 +63,11 @@ func WithDebug(output io.Writer) Option {
 	return func(h *Harness) {
 		if output == nil {
 			h.debug = nil
+			h.debugOutput = nil
 			return
 		}
 		h.debug = log.New(output, "harness: ", log.LstdFlags)
+		h.debugOutput = output
 	}
 }
 
@@ -87,11 +89,12 @@ func WithTools(tools ...Tool) Option {
 // Harness coordinates a model, tools, skills, and conversation threads.
 // Configure it before running it concurrently.
 type Harness struct {
-	model    Model
-	system   string
-	maxSteps int
-	tools    *toolRegistry
-	debug    *log.Logger
+	model       Model
+	system      string
+	maxSteps    int
+	tools       *toolRegistry
+	debug       *log.Logger
+	debugOutput io.Writer
 
 	mu       sync.RWMutex
 	skills   map[string]Skill
@@ -104,6 +107,13 @@ type MCPServer interface {
 	// @param ctx discovery cancellation context.
 	// @return discovered tools or connection error.
 	Tools(context.Context) ([]Tool, error)
+}
+
+type mcpDebugServer interface {
+	// SetDebug configures the MCP debug destination.
+	// @param output debug log destination.
+	// @return none.
+	SetDebug(io.Writer)
 }
 
 // New creates a Harness. A model may be configured now or later with SetModel.
@@ -146,6 +156,9 @@ func (h *Harness) Tools(tools ...Tool) error {
 func (h *Harness) MCP(ctx context.Context, server MCPServer) error {
 	if server == nil {
 		return errors.New("harness: nil MCP server")
+	}
+	if debugServer, ok := server.(mcpDebugServer); ok && h.debugOutput != nil {
+		debugServer.SetDebug(h.debugOutput)
 	}
 	tools, err := server.Tools(ctx)
 	if err != nil {

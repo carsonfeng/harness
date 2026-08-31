@@ -1,8 +1,10 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +13,20 @@ import (
 	"testing"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+// RoundTrip invokes a test HTTP transport function.
+// @param request outgoing HTTP request.
+// @return HTTP response or transport error.
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
 // TestModernToolsAndCall verifies stateless discovery, pagination, and calls.
 // @param t test state.
 // @return none.
 func TestModernToolsAndCall(t *testing.T) {
+	var logs bytes.Buffer
 	var mu sync.Mutex
 	listCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +75,7 @@ func TestModernToolsAndCall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(Config{Endpoint: server.URL, ToolPrefix: "remote_"})
+	client := New(Config{Endpoint: server.URL, ToolPrefix: "remote_", Debug: &logs})
 	tools, err := client.Tools(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +93,22 @@ func TestModernToolsAndCall(t *testing.T) {
 	}
 	if string(encoded) != `{"temperature":28}` {
 		t.Fatalf("result = %s", encoded)
+	}
+	output := logs.String()
+	for _, want := range []string{
+		"event=discovery_start",
+		`event=tools_list protocol="2026-07-28" tools=["lookup.weather"] next_cursor=true`,
+		`event=discovery_finish protocol="2026-07-28" tools=["lookup.weather" "ping"]`,
+		`event=tool_call tool="lookup.weather" arguments={"city":"Guangzhou"}`,
+		`event=tool_result tool="lookup.weather" is_error=false`,
+		`"structuredContent":{"temperature":28}`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("MCP debug output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, server.URL) {
+		t.Fatalf("MCP debug output leaked endpoint:\n%s", output)
 	}
 }
 
@@ -171,5 +199,33 @@ func TestNormalizedNameCollision(t *testing.T) {
 	_, err := client.wrapTools([]remoteDefinition{{Name: "one.two"}, {Name: "one/two"}})
 	if err == nil || !strings.Contains(err.Error(), "normalize") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestDebugRedactsEndpoint verifies URL credentials never enter MCP logs.
+// @param t test state.
+// @return none.
+func TestDebugRedactsEndpoint(t *testing.T) {
+	var logs bytes.Buffer
+	endpoint := "https://example.com/private?token=endpoint-secret"
+	client := New(Config{
+		Endpoint: endpoint,
+		Headers:  map[string]string{"Authorization": "Bearer header-secret"},
+		Debug:    &logs,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return nil, errors.New("cannot reach " + request.URL.String())
+		})},
+	})
+	if _, err := client.Tools(context.Background()); err == nil {
+		t.Fatal("expected discovery error")
+	}
+	output := logs.String()
+	for _, secret := range []string{endpoint, "endpoint-secret", "header-secret"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("MCP debug output leaked %q:\n%s", secret, output)
+		}
+	}
+	if !strings.Contains(output, "[endpoint]") {
+		t.Fatalf("MCP debug output did not show endpoint redaction:\n%s", output)
 	}
 }

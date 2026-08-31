@@ -440,6 +440,10 @@ agent := harness.New(
 和 Tool Result 最多预览 500 个字符。Skill 加载成功后只显示名称、Tool 白名单和步数，
 不会重复打印整段 Instructions。
 
+当 `agent.MCP` 接收 `mcp.Client` 时，同一个 `WithDebug` 输出还会记录 MCP 协议协商、
+Tool 发现、远端 Tool 完整名称和参数，以及最多 500 字符的结果预览。日志不会把
+MCP Endpoint URL 和请求 Header 作为传输元数据打印；传输错误中的 Endpoint 会被脱敏。
+
 ```text
 harness: 2026/08/29 12:00:00 step=1/20 event=model_request skill="" added_messages=1 total_messages=9 tools=["get_weather"]
 harness: 2026/08/29 12:00:00 step=1/20 event=model_request_delta
@@ -452,6 +456,8 @@ harness: 2026/08/29 12:00:00 step=1/20 event=model_request_delta
 harness: 2026/08/29 12:00:01 step=1/20 event=tool_call tool="get_weather" call_id="call_123"
 harness: 2026/08/29 12:00:01 step=1/20 event=tool_arguments
 {"arguments":{"city":"Shenzhen"},"call_id":"call_123","tool":"get_weather"}
+mcp: 2026/08/31 12:00:01 event=tool_call tool="get_weather" arguments={"city":"Shenzhen"}
+mcp: 2026/08/31 12:00:01 event=tool_result tool="get_weather" is_error=false result={"content":[{"type":"text","text":"28°C, sunny"}]}
 ```
 
 Debug Logging 默认关闭。向 `WithDebug` 传入 nil 可以显式关闭。所有可运行示例都会

@@ -450,6 +450,12 @@ Model text and Tool Results use a 500-character preview. Successful Skill loads
 show the Skill name, allowlist, and step limit without repeating its full
 instructions.
 
+When `agent.MCP` receives an `mcp.Client`, the same `WithDebug` output also
+records MCP protocol negotiation, Tool discovery, remote Tool names and full
+arguments, and a 500-character result preview. MCP Endpoint URLs and request
+Headers are not added as transport metadata, and Endpoint values are redacted
+from transport errors.
+
 ```text
 harness: 2026/08/29 12:00:00 step=1/20 event=model_request skill="" added_messages=1 total_messages=9 tools=["get_weather"]
 harness: 2026/08/29 12:00:00 step=1/20 event=model_request_delta
@@ -462,6 +468,8 @@ harness: 2026/08/29 12:00:00 step=1/20 event=model_request_delta
 harness: 2026/08/29 12:00:01 step=1/20 event=tool_call tool="get_weather" call_id="call_123"
 harness: 2026/08/29 12:00:01 step=1/20 event=tool_arguments
 {"arguments":{"city":"Shenzhen"},"call_id":"call_123","tool":"get_weather"}
+mcp: 2026/08/31 12:00:01 event=tool_call tool="get_weather" arguments={"city":"Shenzhen"}
+mcp: 2026/08/31 12:00:01 event=tool_result tool="get_weather" is_error=false result={"content":[{"type":"text","text":"28°C, sunny"}]}
 ```
 
 Debug logging is disabled by default. Pass nil to `WithDebug` to disable it

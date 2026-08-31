@@ -94,6 +94,29 @@ error is appended to the Thread, allowing the model to fix arguments or choose
 another tool. JSON-RPC and HTTP failures also include the MCP method and Tool
 name in the returned error chain.
 
+## Debug logging
+
+`harness.WithDebug` automatically enables MCP logging when `agent.MCP` registers
+an `mcp.Client`. No second logger is required:
+
+```go
+agent := harness.New(
+    harness.WithModel(model),
+    harness.WithDebug(os.Stderr),
+)
+if err := agent.MCP(ctx, server); err != nil {
+    log.Fatal(err)
+}
+```
+
+MCP events include protocol negotiation, each `tools/list` page, discovered
+Tool names, complete `tools/call` arguments, transport errors, and Tool results.
+Results are capped at 500 characters; arguments are not truncated. Endpoint
+URLs and custom request Headers are not emitted as transport metadata, and
+Endpoint values are redacted from transport errors. Tool arguments and results
+may themselves contain sensitive data. To use MCP logging without a Harness,
+set `mcp.Config.Debug` or call `client.SetDebug`.
+
 ## Security
 
 MCP Tools may read or modify external systems. Applications should expose only
