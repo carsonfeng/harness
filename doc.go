@@ -6,5 +6,6 @@
 // produces a final answer.
 //
 // The core package intentionally has no third-party dependencies. Model
-// providers and application-specific tools can be implemented outside it.
+// providers, MCP servers, and application-specific tools can be implemented
+// outside it.
 package harness

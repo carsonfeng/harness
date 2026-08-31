@@ -12,6 +12,32 @@ import (
 	corethread "github.com/carsonfeng/harness/thread"
 )
 
+type mcpServerFunc func(context.Context) ([]Tool, error)
+
+// Tools invokes a test MCP discovery function.
+// @param ctx discovery cancellation context.
+// @return discovered tools or error.
+func (f mcpServerFunc) Tools(ctx context.Context) ([]Tool, error) { return f(ctx) }
+
+// TestMCPRegistersDiscoveredTools verifies MCP registration in the root API.
+// @param t test state.
+// @return none.
+func TestMCPRegistersDiscoveredTools(t *testing.T) {
+	type empty struct{}
+	server := mcpServerFunc(func(context.Context) ([]Tool, error) {
+		return []Tool{Func("remote", "Remote tool", func(context.Context, empty) (string, error) {
+			return "ok", nil
+		})}, nil
+	})
+	h := New()
+	if err := h.MCP(context.Background(), server); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.tools.tools) != 1 || h.tools.tools["remote"] == nil {
+		t.Fatalf("registered tools = %#v", h.tools.tools)
+	}
+}
+
 // TestRunToolLoop verifies a complete model-tool-model cycle.
 // @param t test state.
 // @return none.
@@ -82,7 +108,7 @@ func TestMaxSteps(t *testing.T) {
 	}
 }
 
-// TestDebugLogsLoopProgress verifies full request, response, and tool payloads.
+// TestDebugLogsLoopProgress verifies incremental messages and tool payloads.
 // @param t test state.
 // @return none.
 func TestDebugLogsLoopProgress(t *testing.T) {

@@ -27,6 +27,7 @@ It is not a workflow engine, RAG framework, hosted platform, or multi-agent syst
 - OpenAI Chat Completions API
 - OpenAI Responses API
 - Anthropic Messages API
+- MCP Streamable HTTP tools
 - Custom `BaseURL`, headers, and `http.Client`
 - Generic Go functions as model tools
 - Automatic JSON Schema generation from Go structs
@@ -165,6 +166,50 @@ A-Z  a-z  0-9  _  -
 ```
 
 Duplicate names return a registration error.
+
+## MCP
+
+Connect a Streamable HTTP MCP server and register all of its tools:
+
+```go
+import "github.com/carsonfeng/harness/mcp"
+
+server := mcp.New(mcp.Config{
+    Endpoint: os.Getenv("MCP_ENDPOINT"),
+    Headers: map[string]string{
+        "Authorization": "Bearer " + os.Getenv("MCP_TOKEN"),
+    },
+})
+
+if err := agent.MCP(ctx, server); err != nil {
+    log.Fatal(err)
+}
+
+result, err := agent.Run(ctx, "Use the available tools to answer my request.")
+```
+
+`agent.MCP` discovers tools before the run and registers them like ordinary Go
+tools. Harness supports current stateless MCP (`2026-07-28`) and automatically
+falls back to the initialize/session lifecycle used by MCP `2025-11-25` and
+earlier Streamable HTTP servers. JSON and SSE responses are supported.
+
+Use `ToolPrefix` when several MCP servers may expose the same name:
+
+```go
+server := mcp.New(mcp.Config{
+    Endpoint:   os.Getenv("MCP_ENDPOINT"),
+    ToolPrefix: "database_",
+})
+```
+
+Remote names that are not portable across model providers are normalized to
+letters, numbers, `_`, and `-`. A normalization collision returns an error.
+Tool results prefer MCP `structuredContent`; otherwise textual content is
+returned to the model. MCP tool errors remain visible to the model so it can
+correct its next call.
+
+See the [MCP guide](docs/mcp.md) for authentication, multiple servers, protocol
+compatibility, result handling, and security guidance.
 
 ## Model adapters
 
@@ -547,6 +592,7 @@ Tests and lightweight adapters can use `harness.ModelFunc` directly.
 | `examples/openai-responses` | OpenAI Responses with a local-time tool | Depends on the host |
 | `examples/anthropic` | Anthropic Messages with an addition tool | Depends on the host |
 | `examples/custom-host` | OpenAI-compatible gateway or local model | Depends on the host |
+| `examples/mcp` | Discover and call tools from an MCP server | Model and MCP host dependent |
 
 The primary examples use OpenAI Chat Completions:
 
@@ -582,6 +628,16 @@ OPENAI_MODEL=local-model \
 go run ./examples/custom-host
 ```
 
+Run the MCP example without putting endpoint credentials in source code:
+
+```bash
+MCP_ENDPOINT=... OPENAI_API_KEY=... OPENAI_MODEL=... \
+go run ./examples/mcp
+```
+
+Optional variables are `MCP_BEARER_TOKEN`, `MCP_TOOL_PREFIX`, `MCP_PROMPT`, and
+`OPENAI_BASE_URL`.
+
 See the [examples guide](docs/examples.md) for more details.
 
 ## Project layout
@@ -597,6 +653,7 @@ harness/
 │   ├── openai/                    # Chat Completions and Responses
 │   └── anthropic/                 # Anthropic Messages
 ├── tool/                          # Generic tools and JSON Schema
+├── mcp/                           # Streamable HTTP MCP client
 ├── skill/                         # SKILL.md loading
 ├── thread/                        # Concurrent conversation state
 ├── internal/httpjson/             # Shared HTTP transport
@@ -616,6 +673,7 @@ Provider and extension authors may import the focused packages directly:
 ```text
 github.com/carsonfeng/harness/model
 github.com/carsonfeng/harness/tool
+github.com/carsonfeng/harness/mcp
 github.com/carsonfeng/harness/skill
 github.com/carsonfeng/harness/thread
 ```
@@ -628,7 +686,7 @@ Harness intentionally does not yet include:
 - Automatic retries and backoff
 - Usage or token statistics
 - Every provider-specific generation option
-- MCP
+- MCP stdio transport
 - RAG and vector databases
 - Workflow graphs
 - Multi-agent orchestration

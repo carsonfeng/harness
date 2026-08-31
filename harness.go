@@ -98,6 +98,14 @@ type Harness struct {
 	setupErr error
 }
 
+// MCPServer discovers remote tools for registration.
+type MCPServer interface {
+	// Tools returns the server's currently available tools.
+	// @param ctx discovery cancellation context.
+	// @return discovered tools or connection error.
+	Tools(context.Context) ([]Tool, error)
+}
+
 // New creates a Harness. A model may be configured now or later with SetModel.
 // @param options harness options.
 // @return configured harness.
@@ -129,6 +137,21 @@ func (h *Harness) Tools(tools ...Tool) error {
 		}
 	}
 	return nil
+}
+
+// MCP discovers and registers tools from one MCP server.
+// @param ctx discovery cancellation context.
+// @param server configured MCP server.
+// @return discovery or registration error.
+func (h *Harness) MCP(ctx context.Context, server MCPServer) error {
+	if server == nil {
+		return errors.New("harness: nil MCP server")
+	}
+	tools, err := server.Tools(ctx)
+	if err != nil {
+		return err
+	}
+	return h.Tools(tools...)
 }
 
 // Skill registers or replaces one in-memory skill.

@@ -11,6 +11,7 @@ Each example focuses on one concept and is a standalone Go command.
 | `examples/openai-responses` | Responses API with a typed tool | OpenAI-compatible Responses |
 | `examples/anthropic` | Claude Messages with a typed tool | Anthropic-compatible Messages |
 | `examples/custom-host` | Local server or API gateway | OpenAI-compatible Chat Completions |
+| `examples/mcp` | Discover and call remote MCP tools | OpenAI-compatible Chat Completions + MCP |
 
 Start with `weather` to see a real model → tool → model lifecycle. Run
 `multi-turn` to see two user turns query a tool and a third turn use the
@@ -21,6 +22,12 @@ allowed application tool. The caller never selects the skill directly.
 Set `OPENAI_MODEL` and, for official OpenAI, `OPENAI_API_KEY`. Set the optional
 `OPENAI_BASE_URL` to use a compatible gateway or local server. The Anthropic
 example uses the equivalent `ANTHROPIC_*` variables.
+
+The MCP example reads `MCP_ENDPOINT` at runtime and never stores endpoint
+credentials in source code. It also accepts `MCP_BEARER_TOKEN`,
+`MCP_TOOL_PREFIX`, and `MCP_PROMPT`.
+
+See the [MCP guide](mcp.md) for protocol compatibility and security guidance.
 
 Every example enables `harness.WithDebug(os.Stderr)`, so model-loop progress is
 visible while the final answer remains on standard output. Debug output shows

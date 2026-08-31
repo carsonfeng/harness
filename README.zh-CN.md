@@ -27,6 +27,7 @@ Harness 只提供构建 Agent 最必要的能力：
 - 支持 OpenAI Chat Completions API
 - 支持 OpenAI Responses API
 - 支持 Anthropic Messages API
+- 支持 MCP Streamable HTTP Tool
 - 支持自定义 `BaseURL`、Header 和 `http.Client`
 - 使用泛型将 Go 函数注册为 Tool
 - 自动从 Go 结构体生成 JSON Schema
@@ -165,6 +166,46 @@ A-Z  a-z  0-9  _  -
 ```
 
 重复名称会返回注册错误。
+
+## MCP
+
+连接 Streamable HTTP MCP Server，并注册它提供的全部 Tool：
+
+```go
+import "github.com/carsonfeng/harness/mcp"
+
+server := mcp.New(mcp.Config{
+    Endpoint: os.Getenv("MCP_ENDPOINT"),
+    Headers: map[string]string{
+        "Authorization": "Bearer " + os.Getenv("MCP_TOKEN"),
+    },
+})
+
+if err := agent.MCP(ctx, server); err != nil {
+    log.Fatal(err)
+}
+
+result, err := agent.Run(ctx, "请使用可用工具完成我的请求。")
+```
+
+`agent.MCP` 会在运行前发现远端 Tool，并像普通 Go Tool 一样注册。Harness 支持
+当前无状态 MCP（`2026-07-28`），也会自动回退到 MCP `2025-11-25` 及更早
+Streamable HTTP Server 使用的 initialize/session 生命周期。JSON 与 SSE 响应均受支持。
+
+连接多个 MCP Server 时，可用 `ToolPrefix` 避免重名：
+
+```go
+server := mcp.New(mcp.Config{
+    Endpoint:   os.Getenv("MCP_ENDPOINT"),
+    ToolPrefix: "database_",
+})
+```
+
+不兼容模型 Provider 的远端名称会被规范化为字母、数字、`_` 和 `-`；如果规范化后
+发生冲突，会直接返回错误。Tool Result 优先使用 MCP `structuredContent`，否则返回
+文本内容。MCP Tool Error 会继续传给模型，使其能够修正下一次调用。
+
+认证、多 Server、协议兼容、结果处理和安全说明见 [MCP 指南](docs/mcp.md)。
 
 ## 模型适配器
 
@@ -541,6 +582,7 @@ type Model interface {
 | `examples/openai-responses` | OpenAI Responses + 本地时间 Tool | 取决于 Host |
 | `examples/anthropic` | Anthropic Messages + 加法 Tool | 取决于 Host |
 | `examples/custom-host` | OpenAI 兼容网关或本地模型 | 取决于 Host |
+| `examples/mcp` | 自动发现并调用 MCP Tool | 取决于模型和 MCP Host |
 
 主要示例使用 OpenAI Chat Completions：
 
@@ -577,6 +619,16 @@ OPENAI_MODEL=local-model \
 go run ./examples/custom-host
 ```
 
+运行 MCP 示例，Endpoint 和凭据只通过环境变量传入：
+
+```bash
+MCP_ENDPOINT=... OPENAI_API_KEY=... OPENAI_MODEL=... \
+go run ./examples/mcp
+```
+
+可选变量包括 `MCP_BEARER_TOKEN`、`MCP_TOOL_PREFIX`、`MCP_PROMPT` 和
+`OPENAI_BASE_URL`。
+
 更多说明见 [示例指南](docs/examples.md)。
 
 ## 目录结构
@@ -591,6 +643,7 @@ harness/
 │   ├── openai/                    # Chat Completions / Responses
 │   └── anthropic/                 # Anthropic Messages
 ├── tool/                          # 泛型 Tool 与 JSON Schema
+├── mcp/                           # Streamable HTTP MCP Client
 ├── skill/                         # SKILL.md 加载
 ├── thread/                        # 并发安全的会话状态
 ├── internal/httpjson/             # 内置适配器共用 HTTP 传输
@@ -610,6 +663,7 @@ github.com/carsonfeng/harness
 ```text
 github.com/carsonfeng/harness/model
 github.com/carsonfeng/harness/tool
+github.com/carsonfeng/harness/mcp
 github.com/carsonfeng/harness/skill
 github.com/carsonfeng/harness/thread
 ```
@@ -622,7 +676,7 @@ github.com/carsonfeng/harness/thread
 - 自动重试和退避
 - Usage/Token 统计
 - OpenAI 全部生成参数
-- MCP
+- MCP stdio 传输
 - RAG 与向量数据库
 - Workflow Graph
 - Multi-Agent
